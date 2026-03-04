@@ -143,6 +143,10 @@ After planning, you can hand off to autonomous implementation:
 /ralph spec-driven    # Implement against the spec
 ```
 
+## Credits
+
+Inspired by [ralph-orchestrator](https://github.com/mikeyobrien/ralph-orchestrator) by [@mikeyobrien](https://github.com/mikeyobrien) — the original Ralph Wiggum technique for autonomous AI agent orchestration.
+
 ## License
 
 [MIT](LICENSE)
