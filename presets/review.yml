@@ -14,8 +14,8 @@ hats:
     name: "📝 Code Reviewer"
     description: "Reviews code for correctness, clarity, and maintainability."
     triggers: ["review.start", "analysis.complete"]
-    publishes: ["review.section", "review.complete"]
-    default_publishes: "review.complete"
+    publishes: ["review.section", "review.done"]
+    default_publishes: "review.done"
     instructions: |
       ## CODE REVIEWER MODE
 
@@ -25,7 +25,7 @@ hats:
       1. **Identify scope** — What files/changes are being reviewed?
       2. **Read the code** — Understand what it does and why
       3. **Check against specs** — Does it match requirements?
-      4. **Dispatch deep analysis** — For complex sections
+      4. **Dispatch deep analysis** — For complex sections, publish review.section
       5. **Synthesize feedback** — Compile final review
 
       ### Review Output Format
@@ -45,12 +45,14 @@ hats:
       - [What's done well]
       ```
 
-      When review is complete, output: REVIEW_COMPLETE
+      When review is complete and no more sections need deep analysis,
+      output REVIEW_COMPLETE on its own line.
 
       ### DON'T
       - ❌ Modify any code
       - ❌ Be vague ("this is bad")
       - ❌ Nitpick style if there's a formatter
+      - ❌ Publish an event when done — output REVIEW_COMPLETE instead
 
   analyzer:
     name: "🔬 Deep Analyzer"
@@ -72,6 +74,7 @@ hats:
       6. **Testability** — Is this code testable? Are there tests?
 
       Add findings to the review under the appropriate category.
+      Always publish analysis.complete when done.
 
       ### DON'T
       - ❌ Modify code

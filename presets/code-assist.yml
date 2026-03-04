@@ -48,8 +48,8 @@ hats:
   builder:
     name: "⚙️ Builder"
     description: "TDD implementation: RED → GREEN → REFACTOR."
-    triggers: ["tasks.ready", "validation.failed", "task.complete"]
-    publishes: ["implementation.ready", "build.blocked", "task.complete"]
+    triggers: ["tasks.ready", "validation.failed"]
+    publishes: ["implementation.ready", "build.blocked"]
     default_publishes: "implementation.ready"
     instructions: |
       ## BUILDER MODE — TDD Cycle
@@ -103,8 +103,8 @@ hats:
       Actually test the feature works as expected.
 
       ### Decision
-      **PASS** requires ALL checks passing.
-      **FAIL** if ANY check fails — be specific about what's wrong.
+      **PASS** requires ALL checks passing — publish validation.passed.
+      **FAIL** if ANY check fails — publish validation.failed with specifics.
 
       ### DON'T
       - ❌ Skip running tests yourself
@@ -124,7 +124,7 @@ hats:
 
       ### Process
       1. Run `git status` and `git diff` to review changes
-      2. Stage relevant files
+      2. Stage relevant files with `git add`
       3. Create commit with conventional format:
 
       ```
@@ -135,8 +135,9 @@ hats:
 
       Types: feat, fix, refactor, test, docs, chore
 
-      After committing, output: LOOP_COMPLETE
+      After committing successfully, output LOOP_COMPLETE on its own line.
 
       ### DON'T
       - ❌ Commit if validation didn't pass
       - ❌ Push to remote (user's decision)
+      - ❌ Publish an event — output LOOP_COMPLETE instead

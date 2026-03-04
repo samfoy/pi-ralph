@@ -13,7 +13,7 @@ hats:
   refactorer:
     name: "🔄 Refactorer"
     description: "Executes one atomic refactoring step safely."
-    triggers: ["refactor.task", "verify.failed"]
+    triggers: ["refactor.task", "verify.failed", "verify.passed"]
     publishes: ["refactor.done", "refactor.blocked"]
     default_publishes: "refactor.done"
     instructions: |
@@ -28,6 +28,13 @@ hats:
       3. **PLAN** — Outline the single atomic change
       4. **IMPLEMENT** — Make the change
       5. **VERIFY** — Run tests immediately after
+
+      ### If Triggered by verify.passed
+      The previous step succeeded. Continue with the next refactoring step.
+      If ALL refactoring is complete, output REFACTOR_COMPLETE on its own line.
+
+      ### If Triggered by verify.failed
+      Fix the issues identified by the verifier.
 
       ### If Tests Fail
       DO NOT commit. Publish refactor.blocked with failure details.
@@ -55,6 +62,9 @@ hats:
       3. Build succeeds cleanly
       4. Manual spot-check: does behavior look correct?
 
-      If all pass and refactoring goal is achieved: output REFACTOR_COMPLETE
-      If more refactoring steps remain: publish verify.passed
-      If something broke: publish verify.failed with details
+      Publish verify.passed if all checks pass.
+      Publish verify.failed if something broke — be specific about what's wrong.
+
+      ### DON'T
+      - ❌ Output the completion promise — only the refactorer decides when done
+      - ❌ Skip running tests yourself

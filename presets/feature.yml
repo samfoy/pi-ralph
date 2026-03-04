@@ -1,75 +1,147 @@
 # Feature Development
-# Builder → Reviewer cycle with quality gates.
+# Planner → Builder → Reviewer → Committer loop with task tracking.
+# Loops through all tasks until the plan is fully implemented.
 #
 # Usage: /ralph feature Add user authentication with JWT
 
 event_loop:
-  starting_event: "build.task"
+  starting_event: "plan.start"
   completion_promise: "LOOP_COMPLETE"
-  max_iterations: 30
-  max_runtime_seconds: 7200
+  max_iterations: 100
+  max_runtime_seconds: 14400
 
 hats:
+  planner:
+    name: "📋 Planner"
+    description: "Creates a numbered task list and writes it to the scratchpad."
+    triggers: ["plan.start"]
+    publishes: ["tasks.ready"]
+    default_publishes: "tasks.ready"
+    max_activations: 1
+    disallowed_tools: ["edit", "write"]
+    instructions: |
+      ## PLANNER MODE
+
+      Create an implementation plan as a numbered task list.
+
+      ### Process
+      1. Analyze the task requirements
+      2. Explore the codebase for relevant patterns and existing code
+      3. Break the work into small, atomic tasks (each independently testable)
+      4. Write the task list to the scratchpad
+
+      ### Scratchpad Format
+      Write a task checklist to the scratchpad like:
+
+      ```
+      ## Tasks
+      - [ ] 1. Description of first task
+      - [ ] 2. Description of second task
+      - [ ] 3. Description of third task
+      ```
+
+      You may only use the read, bash, grep, ls, and find tools.
+      Do NOT create or modify any source files — just plan.
+
   builder:
     name: "⚙️ Builder"
-    description: "Implements one task with quality gates. One task, one commit."
-    triggers: ["build.task", "review.changes_requested"]
+    description: "Implements the next uncompleted task from the scratchpad."
+    triggers: ["tasks.ready", "review.changes_requested"]
     publishes: ["build.done", "build.blocked"]
     default_publishes: "build.done"
     instructions: |
-      ## BUILDER MODE
+      ## BUILDER MODE — ONE TASK ONLY
 
-      You're building, not planning. One task, then exit.
+      Read the scratchpad. Find the NEXT unchecked task. Implement ONLY that single task, then stop.
 
-      ### Process: Explore → Plan → Implement → Verify
+      ### Process
+      1. **READ SCRATCHPAD** — Find the next `- [ ]` task. This is your ONLY task.
+      2. **EXPLORE** — Read relevant files, understand current state
+      3. **IMPLEMENT** — Write code following existing patterns
+      4. **TEST** — Write tests, run the full suite
+      5. **VERIFY** — Typecheck, lint, all tests pass
+      6. **UPDATE SCRATCHPAD** — Add notes about what you did
+      7. **PUBLISH EVENT** — You are done. Publish build.done immediately.
 
-      1. **EXPLORE** — Understand before changing
-         - Pick ONE task (highest priority)
-         - Read relevant files and understand current implementation
-         - Search for similar patterns in the codebase
+      You MUST stop after completing ONE task. Do not look at the next task.
+      Do not "while I'm here" any other changes. One task, one event, done.
 
-      2. **PLAN** — Think before coding
-         - Outline the specific changes needed
-         - Identify files to create/modify
-         - Consider edge cases and error handling
-
-      3. **IMPLEMENT** — Execute the plan
-         - Write the code following existing patterns
-         - Run verification (tests, typecheck, lint)
-         - Must pass before proceeding
-
-      4. **VERIFY** — Confirm it works
-         - Run the test suite
-         - Manually verify the change works as expected
+      ### If Triggered by review.changes_requested
+      Fix the specific issues the Reviewer identified.
+      Do NOT move to the next task — fix the current one.
 
       ### DON'T
-      - ❌ Decide what tasks to add — just implement
-      - ❌ Output the completion promise prematurely
-      - ❌ Skip the explore step
+      - ❌ Implement more than ONE task per turn
+      - ❌ Mark tasks complete — the Reviewer does that
       - ❌ Skip tests
 
   reviewer:
     name: "🔎 Reviewer"
-    description: "Reviews implementation for quality. Does NOT modify code."
+    description: "Reviews implementation, marks task done or pushes back."
     triggers: ["build.done"]
     publishes: ["review.approved", "review.changes_requested"]
     default_publishes: "review.approved"
+    disallowed_tools: ["edit", "write"]
     instructions: |
       ## REVIEWER MODE
 
-      Review the most recent implementation for quality.
+      Review the most recent task implementation for quality.
+      You CANNOT modify code — you can only read, run tests, and give feedback.
+
+      ### Process
+      1. Read the scratchpad to understand what task was just implemented
+      2. Read the project's AGENTS.md and any code review guidelines in the system prompt
+      3. Review the code changes (use git diff or read modified files)
+      4. Run the test suite yourself
+      5. Check against the project's coding standards AND the checklist below
 
       ### Checklist
+      - [ ] **Standards:** Does it follow the project's AGENTS.md and code review guidelines?
       - [ ] **Correctness:** Does it match the task requirements?
       - [ ] **Tests:** Are there tests? Do they cover edge cases?
       - [ ] **Patterns:** Does it follow existing codebase patterns?
       - [ ] **Errors:** Is error handling appropriate?
-      - [ ] **Security:** Any obvious vulnerabilities?
 
-      If all checks pass, output LOOP_COMPLETE.
-      If issues found, publish review.changes_requested with specific feedback.
+      ### Decision
+      **If issues found:**
+      - Write specific feedback to the scratchpad under the current task
+      - Publish review.changes_requested
+
+      **If all checks pass:**
+      - Mark the task `- [x]` on the scratchpad
+      - Publish review.approved
 
       ### DON'T
-      - ❌ Make code changes yourself
+      - ❌ Make code changes yourself (you don't have edit/write tools)
       - ❌ Be vague about what's wrong
       - ❌ Block on style nitpicks
+
+  committer:
+    name: "📦 Committer"
+    description: "Commits the current task. Routes back to builder if more tasks remain."
+    triggers: ["review.approved"]
+    publishes: ["tasks.ready", "all.done"]
+    default_publishes: "tasks.ready"
+    instructions: |
+      ## COMMITTER MODE
+
+      Commit the current task, then check if more tasks remain.
+
+      ### Process
+      1. Run `git status` and `git diff` to review changes
+      2. Stage relevant files with `git add`
+      3. Create commit with conventional format:
+         ```
+         <type>(<scope>): <description>
+         ```
+      4. **READ THE SCRATCHPAD** — check if any `- [ ]` tasks remain
+
+      ### Decision
+      - If there are MORE unchecked tasks (`- [ ]`): publish `tasks.ready`
+        (this sends the loop back to the Builder for the next task)
+      - If ALL tasks are checked (`- [x]`): output `LOOP_COMPLETE` on its own line
+
+      ### DON'T
+      - ❌ Commit if tests don't pass
+      - ❌ Push to remote
+      - ❌ Output LOOP_COMPLETE if unchecked tasks remain

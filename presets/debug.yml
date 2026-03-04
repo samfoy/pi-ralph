@@ -13,7 +13,7 @@ hats:
   investigator:
     name: "🔍 Investigator"
     description: "Finds root cause through systematic investigation."
-    triggers: ["debug.start", "hypothesis.rejected", "hypothesis.confirmed", "fix.verified"]
+    triggers: ["debug.start", "hypothesis.rejected"]
     publishes: ["hypothesis.test", "fix.propose"]
     default_publishes: "hypothesis.test"
     instructions: |
@@ -34,8 +34,6 @@ hats:
       - ❌ Guess without evidence
       - ❌ Fix symptoms without understanding cause
       - ❌ Change code during investigation
-
-      When bug is fixed and verified, output: DEBUG_COMPLETE
 
   tester:
     name: "🧪 Hypothesis Tester"
@@ -68,7 +66,7 @@ hats:
   fixer:
     name: "🔧 Bug Fixer"
     description: "Implements minimal fix for confirmed root cause."
-    triggers: ["fix.propose"]
+    triggers: ["fix.propose", "hypothesis.confirmed"]
     publishes: ["fix.applied", "fix.blocked"]
     default_publishes: "fix.applied"
     instructions: |
@@ -105,5 +103,28 @@ hats:
       3. New regression test exists and is meaningful
       4. No new issues introduced
 
-      If all pass: output DEBUG_COMPLETE
-      If failed: publish fix.failed with details
+      If all pass: output DEBUG_COMPLETE on its own line.
+      If failed: publish fix.failed with details.
+
+      ### DON'T
+      - ❌ Publish an event when the fix is verified — output DEBUG_COMPLETE instead
+      - ❌ Skip running the original reproduction steps
+
+  retry:
+    name: "🔁 Retry"
+    description: "Re-routes failed fixes back to the investigator."
+    triggers: ["fix.failed", "fix.blocked"]
+    publishes: ["hypothesis.test"]
+    default_publishes: "hypothesis.test"
+    instructions: |
+      ## RETRY MODE
+
+      The fix didn't work. Analyze what went wrong and formulate a new hypothesis
+      for the investigator to test.
+
+      ### Process
+      1. Review the failure details
+      2. What does this tell us about the root cause?
+      3. Formulate a refined hypothesis
+
+      Publish hypothesis.test with the new hypothesis.

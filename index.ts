@@ -17,7 +17,7 @@
  *   <extension>/presets/*.yml         (built-in)
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -34,6 +34,10 @@ interface HatConfig {
   publishes: string[];
   default_publishes?: string;
   instructions: string;
+  /** Tools this hat is NOT allowed to use (soft enforcement via prompt). */
+  disallowed_tools?: string[];
+  /** Max times this hat can be activated per loop run. */
+  max_activations?: number;
 }
 
 interface EventLoopConfig {
@@ -60,7 +64,10 @@ interface LoopState {
   startTime: number;
   prompt: string;
   active: boolean;
+  cwd: string;
   history: Array<{ hat: string; event: string; iteration: number }>;
+  /** Activation count per hat key for max_activations enforcement. */
+  activations: Record<string, number>;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -173,29 +180,73 @@ function loadAllPresets(cwd: string): Record<string, PresetConfig> {
 // ── Event Detection ────────────────────────────────────────────────────────
 
 const EVENT_PATTERN = />>>\s*EVENT:\s*(\S+)/i;
+const XML_EVENT_PATTERN = /<event\s+topic="([^"]+)"[^>]*>([\s\S]*?)<\/event>/gi;
 
 function detectPublishedEvent(text: string, hat: HatConfig): string | null {
-  // Look for explicit >>> EVENT: name
+  // 1. Look for XML-style event tags (preferred, matches original Ralph)
+  const xmlMatches = [...text.matchAll(XML_EVENT_PATTERN)];
+  if (xmlMatches.length > 0) {
+    // Use the last XML event tag found
+    const lastMatch = xmlMatches[xmlMatches.length - 1];
+    const topic = lastMatch[1];
+    // Validate against hat's publishable events
+    if (hat.publishes.includes(topic)) return topic;
+    // Model used wrong event name — fall back to default
+    console.log(`[ralph] Event "${topic}" not in hat publishes [${hat.publishes.join(", ")}], using default`);
+    return hat.default_publishes || null;
+  }
+
+  // 2. Look for explicit >>> EVENT: name (legacy format)
   const match = text.match(EVENT_PATTERN);
   if (match) {
     const eventName = match[1].replace(/\s*<<<?\s*$/, "");
-    // Validate it's one of the hat's publishable events
     if (hat.publishes.includes(eventName)) return eventName;
-    // If not in publishes list, still return it (might be a valid cross-hat event)
-    return eventName;
+    console.log(`[ralph] Event "${eventName}" not in hat publishes [${hat.publishes.join(", ")}], using default`);
+    return hat.default_publishes || null;
   }
 
-  // Check if any publishable event name appears in the text
-  for (const event of hat.publishes) {
-    // Look for the event name as a standalone reference
-    const escaped = event.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`\\b${escaped}\\b`, "i").test(text)) {
-      return event;
+  // 3. Fall back to default_publishes (no fuzzy matching — too error-prone)
+  return hat.default_publishes || null;
+}
+
+/**
+ * Search ALL assistant messages for a published event, not just the last one.
+ * This handles cases where the model outputs an event early then keeps working.
+ */
+function detectPublishedEventFromMessages(messages: AgentMessage[], hat: HatConfig): string | null {
+  // Scan messages in reverse — prefer the most recent event
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isAssistantMessage(messages[i])) {
+      const text = getAssistantText(messages[i] as AssistantMessage);
+      const event = detectPublishedEvent(text, hat);
+      if (event) return event;
     }
   }
+  return null;
+}
 
-  // Fall back to default_publishes
-  return hat.default_publishes || null;
+/**
+ * Check if any assistant message contains the completion promise.
+ * Uses Ralph-style detection: promise must be on its own line, outside event tags.
+ */
+function containsCompletionPromise(messages: AgentMessage[], promise: string): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isAssistantMessage(messages[i])) {
+      const text = getAssistantText(messages[i] as AssistantMessage);
+      // Strip event tags to avoid false positives from event payloads
+      const stripped = text.replace(/<event\s[^>]*>[\s\S]*?<\/event>/gi, "");
+      // Check if promise appears as a standalone line
+      for (const line of stripped.split("\n").reverse()) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed === promise) return true;
+        // Also check for >>> PROMISE format
+        if (trimmed === `>>> ${promise}`) return true;
+        break; // Only check the last non-empty line per message
+      }
+    }
+  }
+  return false;
 }
 
 function findHatForEvent(event: string, preset: PresetConfig): string | null {
@@ -210,6 +261,7 @@ function findHatForEvent(event: string, preset: PresetConfig): string | null {
 function buildHatInjection(hat: HatConfig, state: LoopState): string {
   const { preset } = state;
   const eventList = hat.publishes.map((e) => `  - ${e}`).join("\n");
+  const scratchpadPath = `${state.cwd}/.ralph/scratchpad.md`;
 
   let injection = `\n## Ralph Orchestration — Hat: ${hat.name}\n`;
   injection += `Iteration ${state.iteration}/${preset.event_loop.max_iterations}\n\n`;
@@ -222,13 +274,32 @@ function buildHatInjection(hat: HatConfig, state: LoopState): string {
     }
   }
 
+  if (hat.disallowed_tools?.length) {
+    injection += "\n\n### TOOL RESTRICTIONS\n";
+    injection += "You MUST NOT use these tools in this hat:\n";
+    for (const tool of hat.disallowed_tools) {
+      injection += `- **${tool}** — blocked for this hat\n`;
+    }
+    injection += "\nUsing a restricted tool is a scope violation.\n";
+  }
+
+  injection += `\n\n### Scratchpad\n`;
+  injection += `Each hat runs in a fresh session with no conversation history from previous hats.\n`;
+  injection += `Use the scratchpad file to pass context between hats:\n\n`;
+  injection += `**File:** \`${scratchpadPath}\`\n\n`;
+  injection += `- **Read it first** — the previous hat's notes are there\n`;
+  injection += `- **Write your notes** before publishing your event — the next hat will read them\n`;
+  injection += `- Include: what you did, what files you changed, any issues found, what the next hat needs to know\n`;
+
   injection += `\n\n### Event Protocol\n`;
-  injection += `When you complete your work for this hat, publish exactly ONE event.\n`;
-  injection += `Write this on its own line:\n\n`;
-  injection += `>>> EVENT: event_name\n\n`;
-  injection += `Events you can publish:\n${eventList}\n\n`;
-  injection += `When the ENTIRE task is fully complete (all work done and verified), instead output:\n`;
-  injection += `>>> ${preset.event_loop.completion_promise}\n\n`;
+  injection += `When you have completed ALL work for this hat, publish exactly ONE event using this XML format:\n\n`;
+  injection += `\`\`\`\n<event topic="event_name">Brief description of what was done</event>\n\`\`\`\n\n`;
+  injection += `You MUST use one of these EXACT event names (no other names are valid):\n${eventList}\n\n`;
+  injection += `**CRITICAL:** The event tag signals the END of your work for this hat. `;
+  injection += `Do ALL your work FIRST (implementation, tests, verification), THEN publish the event as your FINAL output. `;
+  injection += `Do NOT continue working after publishing an event.\n\n`;
+  injection += `When the ENTIRE task is fully complete (all work done, committed, and verified), instead output on its own line:\n`;
+  injection += `${preset.event_loop.completion_promise}\n\n`;
   injection += `Do NOT output ${preset.event_loop.completion_promise} unless ALL work is truly finished.\n`;
 
   return injection;
@@ -306,6 +377,8 @@ export default function ralphExtension(pi: ExtensionAPI) {
   let planModeActive = false;
   // Track whether the last agent turn was triggered by the loop orchestrator
   let loopTriggeredTurn = false;
+  // Store newSession from command context for use in event handlers
+  let storedNewSession: (() => Promise<{ cancelled: boolean }>) | null = null;
 
   function updateStatus(ctx: ExtensionContext) {
     if (loopState?.active && loopState.currentHatKey) {
@@ -385,16 +458,38 @@ export default function ralphExtension(pi: ExtensionAPI) {
       startTime: Date.now(),
       prompt,
       active: true,
+      cwd: ctx.cwd,
       history: [{ hat: startHatKey, event: startEvent || "start", iteration: 1 }],
+      activations: { [startHatKey]: 1 },
     };
+
+    // Capture newSession from command context for use in agent_end handler.
+    // newSession is only available on ExtensionCommandContext (command handlers),
+    // not on the base ExtensionContext (event handlers like agent_end).
+    if ('newSession' in ctx) {
+      storedNewSession = (ctx as any).newSession.bind(ctx);
+    }
+
+    // Create .ralph/ directory for scratchpad
+    const ralphDir = `${ctx.cwd}/.ralph`;
+    if (!existsSync(ralphDir)) {
+      mkdirSync(ralphDir, { recursive: true });
+    }
+    // Initialize scratchpad
+    writeFileSync(`${ralphDir}/scratchpad.md`, `# Ralph Scratchpad\n\nPreset: ${presetName}\nTask: ${prompt}\n\n---\n\n`);
 
     updateStatus(ctx);
     loopTriggeredTurn = true;
 
     const hatName = preset.hats[startHatKey].name;
-    pi.sendUserMessage(
-      `[Ralph Loop: ${presetName}] Starting with hat: ${hatName}\n\nTask: ${prompt}`,
-    );
+
+    // Start a fresh session for the first hat
+    const startNewSession = storedNewSession ?? (() => Promise.resolve({ cancelled: false }));
+    startNewSession().then(() => {
+      pi.sendUserMessage(
+        `[Ralph Loop: ${presetName}] Starting with hat: ${hatName}\n\nTask: ${prompt}`,
+      );
+    });
   }
 
   // ── Commands ───────────────────────────────────────────────────────────
@@ -567,7 +662,12 @@ export default function ralphExtension(pi: ExtensionAPI) {
     const output = getLastAssistantText(event.messages);
     const { preset } = loopState;
 
-    // Check completion promise
+    // Check completion promise (scans all assistant messages)
+    if (containsCompletionPromise(event.messages, preset.event_loop.completion_promise)) {
+      completeLoop(ctx);
+      return;
+    }
+    // Also check legacy format in last message
     if (output.includes(preset.event_loop.completion_promise)) {
       completeLoop(ctx);
       return;
@@ -588,9 +688,9 @@ export default function ralphExtension(pi: ExtensionAPI) {
       }
     }
 
-    // Detect published event
+    // Detect published event (scans all assistant messages, not just the last)
     const currentHat = preset.hats[loopState.currentHatKey];
-    const publishedEvent = detectPublishedEvent(output, currentHat);
+    const publishedEvent = detectPublishedEventFromMessages(event.messages, currentHat);
 
     if (!publishedEvent) {
       stopLoop(ctx, "No event published — loop stalled");
@@ -600,15 +700,28 @@ export default function ralphExtension(pi: ExtensionAPI) {
     // Find next hat
     const nextHatKey = findHatForEvent(publishedEvent, preset);
     if (!nextHatKey) {
-      // No hat handles this event — might be a terminal event
-      // Check if the event signals completion implicitly
-      stopLoop(ctx, `No hat handles event "${publishedEvent}"`);
+      // No hat handles this event — treat as loop completion.
+      // Terminal hats (committer, verifier, etc.) publish events that no other
+      // hat triggers on. This is the normal completion path when the model
+      // publishes an event instead of outputting the completion promise.
+      completeLoop(ctx);
       return;
+    }
+
+    // Check max_activations before advancing
+    const nextHatConfig = preset.hats[nextHatKey];
+    if (nextHatConfig.max_activations) {
+      const count = (loopState.activations[nextHatKey] || 0) + 1;
+      if (count > nextHatConfig.max_activations) {
+        stopLoop(ctx, `Hat "${nextHatConfig.name}" exhausted (${nextHatConfig.max_activations} activations)`);
+        return;
+      }
     }
 
     // Advance loop
     loopState.currentHatKey = nextHatKey;
     loopState.iteration++;
+    loopState.activations[nextHatKey] = (loopState.activations[nextHatKey] || 0) + 1;
     loopState.history.push({
       hat: nextHatKey,
       event: publishedEvent,
@@ -621,11 +734,23 @@ export default function ralphExtension(pi: ExtensionAPI) {
     const nextHat = preset.hats[nextHatKey];
     loopTriggeredTurn = true;
 
-    pi.sendUserMessage(
-      `[Ralph Loop — Iteration ${loopState.iteration}/${preset.event_loop.max_iterations}]\n` +
-        `Event: ${publishedEvent} → Hat: ${nextHat.name}\n\n` +
-        `Continue with the task. The previous hat's work is in the conversation above.`,
+    // Notify hat transition (forwarded to Slack by the bot)
+    ctx.ui.notify(
+      `Ralph loop [${loopState.iteration}/${preset.event_loop.max_iterations}]: ` +
+        `${currentHat.name} → ${nextHat.name} (event: ${publishedEvent})`,
+      "info",
     );
+
+    // Fresh session per hat — context passes through the scratchpad file on disk.
+    const newSessionFn = storedNewSession ?? (() => Promise.resolve({ cancelled: false }));
+    newSessionFn().then(() => {
+      pi.sendUserMessage(
+        `[Ralph Loop — Iteration ${loopState!.iteration}/${preset.event_loop.max_iterations}]\n` +
+          `Event: ${publishedEvent} → Hat: ${nextHat.name}\n\n` +
+          `Task: ${loopState!.prompt}\n\n` +
+          `Read the scratchpad at \`${loopState!.cwd}/.ralph/scratchpad.md\` for context from the previous hat.`,
+      );
+    });
   });
 
   // Persist loop state for session restore

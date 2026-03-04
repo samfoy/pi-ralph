@@ -59,7 +59,7 @@ hats:
   implementer:
     name: "⚙️ Implementer"
     description: "Implements EXACTLY what the spec says. No creative interpretation."
-    triggers: ["spec.approved"]
+    triggers: ["spec.approved", "spec.violated"]
     publishes: ["implementation.done"]
     default_publishes: "implementation.done"
     instructions: |
@@ -75,6 +75,9 @@ hats:
       4. **IMPLEMENT** — Write minimal code to make tests pass
       5. **VERIFY** — Run all tests, confirm all acceptance criteria met
 
+      ### If Triggered by spec.violated
+      Fix the specific violations identified by the verifier.
+
       ### DON'T
       - ❌ Add features not in the spec
       - ❌ Creatively interpret ambiguous requirements
@@ -84,8 +87,8 @@ hats:
     name: "✅ Spec Verifier"
     description: "Verifies implementation matches spec exactly."
     triggers: ["implementation.done"]
-    publishes: ["task.complete", "spec.violated"]
-    default_publishes: "task.complete"
+    publishes: ["verification.passed", "spec.violated"]
+    default_publishes: "verification.passed"
     instructions: |
       ## SPEC VERIFIER MODE
 
@@ -96,5 +99,37 @@ hats:
       2. Manually verify with the examples from the spec
       3. Check edge case handling
 
-      If ALL criteria pass: output LOOP_COMPLETE
-      If violations found: publish spec.violated with specific details
+      If ALL criteria pass: publish verification.passed.
+      If violations found: publish spec.violated with specific details.
+
+      ### DON'T
+      - ❌ Skip running tests yourself
+      - ❌ Approve with known violations
+
+  committer:
+    name: "📦 Committer"
+    description: "Creates conventional commit and completes the loop."
+    triggers: ["verification.passed"]
+    publishes: ["commit.complete"]
+    default_publishes: "commit.complete"
+    instructions: |
+      ## COMMITTER MODE
+
+      Create a well-structured git commit.
+
+      ### Process
+      1. Run `git status` and `git diff` to review changes
+      2. Stage relevant files with `git add`
+      3. Create commit with conventional format:
+
+      ```
+      <type>(<scope>): <description>
+
+      <body — what and why>
+      ```
+
+      After committing successfully, output LOOP_COMPLETE on its own line.
+
+      ### DON'T
+      - ❌ Publish an event — output LOOP_COMPLETE instead
+      - ❌ Push to remote
