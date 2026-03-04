@@ -1,0 +1,60 @@
+# Refactoring Preset
+# Safe refactoring with verification at each step.
+#
+# Usage: /ralph refactor Extract auth logic into a separate module
+
+event_loop:
+  starting_event: "refactor.task"
+  completion_promise: "REFACTOR_COMPLETE"
+  max_iterations: 50
+  max_runtime_seconds: 10800
+
+hats:
+  refactorer:
+    name: "🔄 Refactorer"
+    description: "Executes one atomic refactoring step safely."
+    triggers: ["refactor.task", "verify.failed"]
+    publishes: ["refactor.done", "refactor.blocked"]
+    default_publishes: "refactor.done"
+    instructions: |
+      ## REFACTORER MODE
+
+      Execute ONE atomic refactoring step safely.
+
+      ### Process
+
+      1. **EXPLORE** — Read the code being refactored, understand callers
+      2. **BASELINE** — Verify tests pass before changing anything
+      3. **PLAN** — Outline the single atomic change
+      4. **IMPLEMENT** — Make the change
+      5. **VERIFY** — Run tests immediately after
+
+      ### If Tests Fail
+      DO NOT commit. Publish refactor.blocked with failure details.
+
+      ### DON'T
+      - ❌ Make multiple changes at once
+      - ❌ "Improve" unrelated code
+      - ❌ Skip the baseline test run
+      - ❌ Commit with failing tests
+
+  verifier:
+    name: "✅ Verifier"
+    description: "Verifies refactoring preserved behavior."
+    triggers: ["refactor.done"]
+    publishes: ["verify.passed", "verify.failed"]
+    default_publishes: "verify.passed"
+    instructions: |
+      ## VERIFIER MODE
+
+      Verify the refactoring step preserved behavior.
+
+      ### Checks
+      1. All tests pass
+      2. Linting passes (no new warnings)
+      3. Build succeeds cleanly
+      4. Manual spot-check: does behavior look correct?
+
+      If all pass and refactoring goal is achieved: output REFACTOR_COMPLETE
+      If more refactoring steps remain: publish verify.passed
+      If something broke: publish verify.failed with details

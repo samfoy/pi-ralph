@@ -1,0 +1,75 @@
+# Feature Development
+# Builder → Reviewer cycle with quality gates.
+#
+# Usage: /ralph feature Add user authentication with JWT
+
+event_loop:
+  starting_event: "build.task"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 30
+  max_runtime_seconds: 7200
+
+hats:
+  builder:
+    name: "⚙️ Builder"
+    description: "Implements one task with quality gates. One task, one commit."
+    triggers: ["build.task", "review.changes_requested"]
+    publishes: ["build.done", "build.blocked"]
+    default_publishes: "build.done"
+    instructions: |
+      ## BUILDER MODE
+
+      You're building, not planning. One task, then exit.
+
+      ### Process: Explore → Plan → Implement → Verify
+
+      1. **EXPLORE** — Understand before changing
+         - Pick ONE task (highest priority)
+         - Read relevant files and understand current implementation
+         - Search for similar patterns in the codebase
+
+      2. **PLAN** — Think before coding
+         - Outline the specific changes needed
+         - Identify files to create/modify
+         - Consider edge cases and error handling
+
+      3. **IMPLEMENT** — Execute the plan
+         - Write the code following existing patterns
+         - Run verification (tests, typecheck, lint)
+         - Must pass before proceeding
+
+      4. **VERIFY** — Confirm it works
+         - Run the test suite
+         - Manually verify the change works as expected
+
+      ### DON'T
+      - ❌ Decide what tasks to add — just implement
+      - ❌ Output the completion promise prematurely
+      - ❌ Skip the explore step
+      - ❌ Skip tests
+
+  reviewer:
+    name: "🔎 Reviewer"
+    description: "Reviews implementation for quality. Does NOT modify code."
+    triggers: ["build.done"]
+    publishes: ["review.approved", "review.changes_requested"]
+    default_publishes: "review.approved"
+    instructions: |
+      ## REVIEWER MODE
+
+      Review the most recent implementation for quality.
+
+      ### Checklist
+      - [ ] **Correctness:** Does it match the task requirements?
+      - [ ] **Tests:** Are there tests? Do they cover edge cases?
+      - [ ] **Patterns:** Does it follow existing codebase patterns?
+      - [ ] **Errors:** Is error handling appropriate?
+      - [ ] **Security:** Any obvious vulnerabilities?
+
+      If all checks pass, output LOOP_COMPLETE.
+      If issues found, publish review.changes_requested with specific feedback.
+
+      ### DON'T
+      - ❌ Make code changes yourself
+      - ❌ Be vague about what's wrong
+      - ❌ Block on style nitpicks

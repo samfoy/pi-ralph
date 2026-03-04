@@ -1,0 +1,100 @@
+# Specification-First Development
+# Spec Writer → Critic → Implementer → Verifier
+#
+# Usage: /ralph spec-driven Build a rate limiter
+
+event_loop:
+  starting_event: "spec.start"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 50
+  max_runtime_seconds: 10800
+
+hats:
+  spec_writer:
+    name: "📋 Spec Writer"
+    description: "Creates precise, unambiguous specifications with examples."
+    triggers: ["spec.start", "spec.rejected"]
+    publishes: ["spec.ready"]
+    default_publishes: "spec.ready"
+    instructions: |
+      ## SPEC WRITER MODE
+
+      Create a precise, unambiguous specification.
+
+      Include:
+      - **Summary**: One sentence describing what this does
+      - **Acceptance Criteria**: Given-When-Then format (be exhaustive)
+      - **Input/Output Examples**: Concrete values
+      - **Edge Cases**: Error conditions and unusual inputs
+      - **Non-functional Requirements**: Performance, security
+      - **Out of Scope**: What this does NOT do
+
+      Write the spec so someone who hasn't seen the original task
+      could implement it correctly from the spec alone.
+
+  spec_reviewer:
+    name: "🔎 Spec Critic"
+    description: "Reviews spec for completeness. Could someone implement from this alone?"
+    triggers: ["spec.ready"]
+    publishes: ["spec.approved", "spec.rejected"]
+    default_publishes: "spec.approved"
+    instructions: |
+      ## SPEC CRITIC MODE
+
+      Review the spec for completeness and clarity.
+
+      Checklist:
+      - [ ] Could a new team member implement this from the spec alone?
+      - [ ] Are all acceptance criteria testable?
+      - [ ] Are edge cases covered?
+      - [ ] Are error conditions specified?
+      - [ ] Are there ambiguous terms that need definition?
+
+      Be pragmatic. Don't reject for minor issues. Only reject for:
+      - Fundamental ambiguity leading to wrong implementation
+      - Missing critical requirements
+
+      After 1 rejection, approve with notes rather than rejecting again.
+
+  implementer:
+    name: "⚙️ Implementer"
+    description: "Implements EXACTLY what the spec says. No creative interpretation."
+    triggers: ["spec.approved"]
+    publishes: ["implementation.done"]
+    default_publishes: "implementation.done"
+    instructions: |
+      ## IMPLEMENTER MODE
+
+      Implement EXACTLY what the spec says.
+
+      ### Process
+
+      1. **EXPLORE** — Read the spec thoroughly, search codebase for similar code
+      2. **PLAN** — Map each acceptance criterion to implementation steps
+      3. **TEST** — Write failing tests first (one per acceptance criterion)
+      4. **IMPLEMENT** — Write minimal code to make tests pass
+      5. **VERIFY** — Run all tests, confirm all acceptance criteria met
+
+      ### DON'T
+      - ❌ Add features not in the spec
+      - ❌ Creatively interpret ambiguous requirements
+      - ❌ Skip writing tests first
+
+  verifier:
+    name: "✅ Spec Verifier"
+    description: "Verifies implementation matches spec exactly."
+    triggers: ["implementation.done"]
+    publishes: ["task.complete", "spec.violated"]
+    default_publishes: "task.complete"
+    instructions: |
+      ## SPEC VERIFIER MODE
+
+      Verify implementation matches the spec exactly.
+
+      Go through each acceptance criterion:
+      1. Run the test for that criterion
+      2. Manually verify with the examples from the spec
+      3. Check edge case handling
+
+      If ALL criteria pass: output LOOP_COMPLETE
+      If violations found: publish spec.violated with specific details

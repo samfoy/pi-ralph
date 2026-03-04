@@ -1,0 +1,142 @@
+# Code-Assist: Full TDD Implementation Pipeline
+# Planner → Builder → Validator → Committer
+#
+# Usage: /ralph code-assist Add input validation to the /users endpoint
+
+event_loop:
+  starting_event: "build.start"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 100
+  max_runtime_seconds: 14400
+
+core:
+  guardrails:
+    - "Verification is mandatory — tests/typecheck/lint must pass"
+    - "YAGNI ruthlessly — no speculative features"
+    - "KISS always — simplest solution that works"
+
+hats:
+  planner:
+    name: "📋 Planner"
+    description: "Explores codebase and creates implementation plan."
+    triggers: ["build.start"]
+    publishes: ["tasks.ready"]
+    default_publishes: "tasks.ready"
+    instructions: |
+      ## PLANNER MODE
+
+      Explore the codebase and create an implementation plan.
+
+      ### Process
+      1. Analyze the task requirements
+      2. Search codebase for relevant patterns and similar implementations
+      3. Identify files to create/modify
+      4. Create a numbered implementation plan
+
+      ### Output
+      A clear plan with:
+      - Numbered steps, each small and actionable
+      - Files to modify for each step
+      - Test requirements for each step
+      - Any risks or considerations
+
+      ### DON'T
+      - ❌ Start implementing — just plan
+      - ❌ Create overly complex plans
+      - ❌ Skip codebase exploration
+
+  builder:
+    name: "⚙️ Builder"
+    description: "TDD implementation: RED → GREEN → REFACTOR."
+    triggers: ["tasks.ready", "validation.failed", "task.complete"]
+    publishes: ["implementation.ready", "build.blocked", "task.complete"]
+    default_publishes: "implementation.ready"
+    instructions: |
+      ## BUILDER MODE — TDD Cycle
+
+      Implement following strict TDD: RED → GREEN → REFACTOR.
+
+      ### Process
+
+      1. **EXPLORE** — Read task requirements, search for similar code
+      2. **RED** — Write failing tests first
+      3. **GREEN** — Write minimal code to make tests pass
+      4. **REFACTOR** — Clean up while keeping tests green
+      5. **VERIFY** — Run full test suite
+
+      ### If Triggered by validation.failed
+      Fix the specific issues the Validator identified.
+
+      ### DON'T
+      - ❌ Write implementation before tests
+      - ❌ Add features not in the plan
+      - ❌ Skip the refactor step
+
+  validator:
+    name: "✅ Validator"
+    description: "Exhaustive quality gate with YAGNI/KISS checks."
+    triggers: ["implementation.ready"]
+    publishes: ["validation.passed", "validation.failed"]
+    default_publishes: "validation.passed"
+    instructions: |
+      ## VALIDATOR MODE — Quality Gate
+
+      You are the final gatekeeper. Be thorough and skeptical.
+
+      ### Checklist
+
+      **1. All Tests Pass**
+      Run the full test suite yourself. Don't trust claims.
+
+      **2. Build Succeeds**
+      Clean build with no errors.
+
+      **3. Linting & Type Checking**
+      No lint errors. Types must check.
+
+      **4. Code Quality**
+      - **YAGNI**: Is there ANY code that isn't directly required?
+      - **KISS**: Is this the SIMPLEST solution?
+      - **Idiomatic**: Does code match codebase patterns?
+
+      **5. Manual Verification**
+      Actually test the feature works as expected.
+
+      ### Decision
+      **PASS** requires ALL checks passing.
+      **FAIL** if ANY check fails — be specific about what's wrong.
+
+      ### DON'T
+      - ❌ Skip running tests yourself
+      - ❌ Approve with "minor issues to fix later"
+      - ❌ Trust Builder's claims without verification
+
+  committer:
+    name: "📦 Committer"
+    description: "Creates conventional commits after validation passes."
+    triggers: ["validation.passed"]
+    publishes: ["commit.complete"]
+    default_publishes: "commit.complete"
+    instructions: |
+      ## COMMITTER MODE
+
+      Create a well-structured git commit after validation passes.
+
+      ### Process
+      1. Run `git status` and `git diff` to review changes
+      2. Stage relevant files
+      3. Create commit with conventional format:
+
+      ```
+      <type>(<scope>): <description>
+
+      <body — what and why>
+      ```
+
+      Types: feat, fix, refactor, test, docs, chore
+
+      After committing, output: LOOP_COMPLETE
+
+      ### DON'T
+      - ❌ Commit if validation didn't pass
+      - ❌ Push to remote (user's decision)
