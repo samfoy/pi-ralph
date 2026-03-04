@@ -14,8 +14,7 @@ hats:
     name: "🔄 Refactorer"
     description: "Executes one atomic refactoring step safely."
     triggers: ["refactor.task", "verify.failed", "verify.passed"]
-    publishes: ["refactor.done", "refactor.blocked"]
-    default_publishes: "refactor.done"
+    publishes: ["refactor.done"]
     instructions: |
       ## REFACTORER MODE
 
@@ -37,7 +36,7 @@ hats:
       Fix the issues identified by the verifier.
 
       ### If Tests Fail
-      DO NOT commit. Publish refactor.blocked with failure details.
+      DO NOT commit. Fix the issue and try again.
 
       ### DON'T
       - ❌ Make multiple changes at once

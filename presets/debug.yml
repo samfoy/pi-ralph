@@ -13,9 +13,8 @@ hats:
   investigator:
     name: "🔍 Investigator"
     description: "Finds root cause through systematic investigation."
-    triggers: ["debug.start", "hypothesis.rejected"]
+    triggers: ["debug.start", "hypothesis.rejected", "hypothesis.confirmed", "fix.verified"]
     publishes: ["hypothesis.test", "fix.propose"]
-    default_publishes: "hypothesis.test"
     instructions: |
       ## INVESTIGATOR MODE
 
@@ -29,6 +28,9 @@ hats:
       5. **Narrow** — Eliminate hypotheses, focus on survivors.
 
       When root cause is confirmed, publish fix.propose.
+
+      ### If Triggered by fix.verified
+      The bug is fixed and verified. Output DEBUG_COMPLETE on its own line.
 
       ### DON'T
       - ❌ Guess without evidence
@@ -66,8 +68,8 @@ hats:
   fixer:
     name: "🔧 Bug Fixer"
     description: "Implements minimal fix for confirmed root cause."
-    triggers: ["fix.propose", "hypothesis.confirmed"]
-    publishes: ["fix.applied", "fix.blocked"]
+    triggers: ["fix.propose", "fix.failed"]
+    publishes: ["fix.applied"]
     default_publishes: "fix.applied"
     instructions: |
       ## BUG FIXER MODE
@@ -103,28 +105,12 @@ hats:
       3. New regression test exists and is meaningful
       4. No new issues introduced
 
-      If all pass: output DEBUG_COMPLETE on its own line.
+      If all pass: publish fix.verified
+      (The investigator will then output DEBUG_COMPLETE.)
+
       If failed: publish fix.failed with details.
+      (The fixer will attempt another fix.)
 
       ### DON'T
-      - ❌ Publish an event when the fix is verified — output DEBUG_COMPLETE instead
       - ❌ Skip running the original reproduction steps
-
-  retry:
-    name: "🔁 Retry"
-    description: "Re-routes failed fixes back to the investigator."
-    triggers: ["fix.failed", "fix.blocked"]
-    publishes: ["hypothesis.test"]
-    default_publishes: "hypothesis.test"
-    instructions: |
-      ## RETRY MODE
-
-      The fix didn't work. Analyze what went wrong and formulate a new hypothesis
-      for the investigator to test.
-
-      ### Process
-      1. Review the failure details
-      2. What does this tell us about the root cause?
-      3. Formulate a refined hypothesis
-
-      Publish hypothesis.test with the new hypothesis.
+      - ❌ Approve with known issues

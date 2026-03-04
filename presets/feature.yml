@@ -47,7 +47,7 @@ hats:
     name: "⚙️ Builder"
     description: "Implements the next uncompleted task from the scratchpad."
     triggers: ["tasks.ready", "review.changes_requested"]
-    publishes: ["build.done", "build.blocked"]
+    publishes: ["build.done"]
     default_publishes: "build.done"
     instructions: |
       ## BUILDER MODE — ONE TASK ONLY
@@ -120,8 +120,7 @@ hats:
     name: "📦 Committer"
     description: "Commits the current task. Routes back to builder if more tasks remain."
     triggers: ["review.approved"]
-    publishes: ["tasks.ready", "all.done"]
-    default_publishes: "tasks.ready"
+    publishes: ["tasks.ready"]
     instructions: |
       ## COMMITTER MODE
 
@@ -134,7 +133,8 @@ hats:
          ```
          <type>(<scope>): <description>
          ```
-      4. **READ THE SCRATCHPAD** — check if any `- [ ]` tasks remain
+      4. Mark the current task `- [x]` on the scratchpad
+      5. **CHECK THE SCRATCHPAD** — are there more `- [ ]` tasks?
 
       ### Decision
       - If there are MORE unchecked tasks (`- [ ]`): publish `tasks.ready`

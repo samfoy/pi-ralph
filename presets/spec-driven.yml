@@ -1,5 +1,5 @@
 # Specification-First Development
-# Spec Writer → Critic → Implementer → Verifier
+# Spec Writer → Critic → Implementer → Verifier → Committer, looping per acceptance criterion
 #
 # Usage: /ralph spec-driven Build a rate limiter
 
@@ -23,7 +23,7 @@ hats:
 
       Include:
       - **Summary**: One sentence describing what this does
-      - **Acceptance Criteria**: Given-When-Then format (be exhaustive)
+      - **Acceptance Criteria**: Given-When-Then format (be exhaustive), numbered
       - **Input/Output Examples**: Concrete values
       - **Edge Cases**: Error conditions and unusual inputs
       - **Non-functional Requirements**: Performance, security
@@ -31,6 +31,16 @@ hats:
 
       Write the spec so someone who hasn't seen the original task
       could implement it correctly from the spec alone.
+
+      Also write a numbered task checklist to the scratchpad, one task per
+      acceptance criterion or logical group:
+
+      ```
+      ## Tasks
+      - [ ] 1. Implement [first acceptance criterion]
+      - [ ] 2. Implement [second acceptance criterion]
+      - [ ] 3. Handle edge case: [description]
+      ```
 
   spec_reviewer:
     name: "🔎 Spec Critic"
@@ -58,27 +68,31 @@ hats:
 
   implementer:
     name: "⚙️ Implementer"
-    description: "Implements EXACTLY what the spec says. No creative interpretation."
-    triggers: ["spec.approved", "spec.violated"]
+    description: "Implements ONE task from the scratchpad. No creative interpretation."
+    triggers: ["spec.approved", "spec.violated", "tasks.next"]
     publishes: ["implementation.done"]
     default_publishes: "implementation.done"
     instructions: |
-      ## IMPLEMENTER MODE
+      ## IMPLEMENTER MODE — ONE TASK ONLY
 
-      Implement EXACTLY what the spec says.
+      Read the scratchpad. Find the NEXT unchecked task (`- [ ]`).
+      Implement ONLY that single task against the spec.
 
       ### Process
 
-      1. **EXPLORE** — Read the spec thoroughly, search codebase for similar code
-      2. **PLAN** — Map each acceptance criterion to implementation steps
-      3. **TEST** — Write failing tests first (one per acceptance criterion)
+      1. **READ SCRATCHPAD** — Find the next `- [ ]` task
+      2. **EXPLORE** — Read the spec thoroughly, search codebase for similar code
+      3. **TEST** — Write failing tests first for this task's acceptance criteria
       4. **IMPLEMENT** — Write minimal code to make tests pass
-      5. **VERIFY** — Run all tests, confirm all acceptance criteria met
+      5. **VERIFY** — Run all tests, confirm criteria met
+      6. **UPDATE SCRATCHPAD** — Add notes about what you did
 
       ### If Triggered by spec.violated
       Fix the specific violations identified by the verifier.
+      Do NOT move to the next task — fix the current one.
 
       ### DON'T
+      - ❌ Implement more than ONE task per turn
       - ❌ Add features not in the spec
       - ❌ Creatively interpret ambiguous requirements
       - ❌ Skip writing tests first
@@ -92,10 +106,10 @@ hats:
     instructions: |
       ## SPEC VERIFIER MODE
 
-      Verify implementation matches the spec exactly.
+      Verify the current task's implementation matches the spec exactly.
 
-      Go through each acceptance criterion:
-      1. Run the test for that criterion
+      Go through the relevant acceptance criteria:
+      1. Run the test for each criterion
       2. Manually verify with the examples from the spec
       3. Check edge case handling
 
@@ -108,28 +122,31 @@ hats:
 
   committer:
     name: "📦 Committer"
-    description: "Creates conventional commit and completes the loop."
+    description: "Commits the current task. Routes back to implementer if more tasks remain."
     triggers: ["verification.passed"]
-    publishes: ["commit.complete"]
-    default_publishes: "commit.complete"
+    publishes: ["tasks.next"]
     instructions: |
       ## COMMITTER MODE
 
-      Create a well-structured git commit.
+      Commit the current task, then check if more tasks remain.
 
       ### Process
       1. Run `git status` and `git diff` to review changes
       2. Stage relevant files with `git add`
       3. Create commit with conventional format:
+         ```
+         <type>(<scope>): <description>
 
-      ```
-      <type>(<scope>): <description>
+         <body — what and why>
+         ```
+      4. Mark the current task `- [x]` on the scratchpad
+      5. **CHECK THE SCRATCHPAD** — are there more `- [ ]` tasks?
 
-      <body — what and why>
-      ```
-
-      After committing successfully, output LOOP_COMPLETE on its own line.
+      ### Decision
+      - If there are MORE unchecked tasks (`- [ ]`): publish `tasks.next`
+        (this sends the loop back to the Implementer for the next task)
+      - If ALL tasks are checked (`- [x]`): output `LOOP_COMPLETE` on its own line
 
       ### DON'T
-      - ❌ Publish an event — output LOOP_COMPLETE instead
       - ❌ Push to remote
+      - ❌ Output LOOP_COMPLETE if unchecked tasks remain

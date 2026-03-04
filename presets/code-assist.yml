@@ -1,5 +1,5 @@
 # Code-Assist: Full TDD Implementation Pipeline
-# Planner → Builder → Validator → Committer
+# Planner → Builder → Validator → Committer, looping until all tasks done
 #
 # Usage: /ralph code-assist Add input validation to the /users endpoint
 
@@ -33,12 +33,15 @@ hats:
       3. Identify files to create/modify
       4. Create a numbered implementation plan
 
-      ### Output
-      A clear plan with:
-      - Numbered steps, each small and actionable
-      - Files to modify for each step
-      - Test requirements for each step
-      - Any risks or considerations
+      ### Scratchpad Format
+      Write a task checklist to the scratchpad:
+
+      ```
+      ## Tasks
+      - [ ] 1. Description of first task
+      - [ ] 2. Description of second task
+      - [ ] 3. Description of third task
+      ```
 
       ### DON'T
       - ❌ Start implementing — just plan
@@ -47,27 +50,32 @@ hats:
 
   builder:
     name: "⚙️ Builder"
-    description: "TDD implementation: RED → GREEN → REFACTOR."
+    description: "TDD implementation of ONE task: RED → GREEN → REFACTOR."
     triggers: ["tasks.ready", "validation.failed"]
-    publishes: ["implementation.ready", "build.blocked"]
+    publishes: ["implementation.ready"]
     default_publishes: "implementation.ready"
     instructions: |
-      ## BUILDER MODE — TDD Cycle
+      ## BUILDER MODE — TDD Cycle (ONE TASK ONLY)
 
-      Implement following strict TDD: RED → GREEN → REFACTOR.
+      Read the scratchpad. Find the NEXT unchecked task (`- [ ]`).
+      Implement ONLY that single task using strict TDD.
 
       ### Process
 
-      1. **EXPLORE** — Read task requirements, search for similar code
-      2. **RED** — Write failing tests first
-      3. **GREEN** — Write minimal code to make tests pass
-      4. **REFACTOR** — Clean up while keeping tests green
-      5. **VERIFY** — Run full test suite
+      1. **READ SCRATCHPAD** — Find the next `- [ ]` task. This is your ONLY task.
+      2. **EXPLORE** — Read task requirements, search for similar code
+      3. **RED** — Write failing tests first
+      4. **GREEN** — Write minimal code to make tests pass
+      5. **REFACTOR** — Clean up while keeping tests green
+      6. **VERIFY** — Run full test suite
+      7. **UPDATE SCRATCHPAD** — Add notes about what you did
 
       ### If Triggered by validation.failed
       Fix the specific issues the Validator identified.
+      Do NOT move to the next task — fix the current one.
 
       ### DON'T
+      - ❌ Implement more than ONE task per turn
       - ❌ Write implementation before tests
       - ❌ Add features not in the plan
       - ❌ Skip the refactor step
@@ -113,31 +121,33 @@ hats:
 
   committer:
     name: "📦 Committer"
-    description: "Creates conventional commits after validation passes."
+    description: "Commits the current task. Routes back to builder if more tasks remain."
     triggers: ["validation.passed"]
-    publishes: ["commit.complete"]
-    default_publishes: "commit.complete"
+    publishes: ["tasks.ready"]
     instructions: |
       ## COMMITTER MODE
 
-      Create a well-structured git commit after validation passes.
+      Commit the current task, then check if more tasks remain.
 
       ### Process
       1. Run `git status` and `git diff` to review changes
       2. Stage relevant files with `git add`
       3. Create commit with conventional format:
+         ```
+         <type>(<scope>): <description>
 
-      ```
-      <type>(<scope>): <description>
+         <body — what and why>
+         ```
+         Types: feat, fix, refactor, test, docs, chore
+      4. Mark the current task `- [x]` on the scratchpad
+      5. **CHECK THE SCRATCHPAD** — are there more `- [ ]` tasks?
 
-      <body — what and why>
-      ```
-
-      Types: feat, fix, refactor, test, docs, chore
-
-      After committing successfully, output LOOP_COMPLETE on its own line.
+      ### Decision
+      - If there are MORE unchecked tasks (`- [ ]`): publish `tasks.ready`
+        (this sends the loop back to the Builder for the next task)
+      - If ALL tasks are checked (`- [x]`): output `LOOP_COMPLETE` on its own line
 
       ### DON'T
       - ❌ Commit if validation didn't pass
       - ❌ Push to remote (user's decision)
-      - ❌ Publish an event — output LOOP_COMPLETE instead
+      - ❌ Output LOOP_COMPLETE if unchecked tasks remain

@@ -17,58 +17,22 @@
  *   <extension>/presets/*.yml         (built-in)
  */
 
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
-import yaml from "js-yaml";
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
-interface HatConfig {
-  name: string;
-  description: string;
-  triggers: string[];
-  publishes: string[];
-  default_publishes?: string;
-  instructions: string;
-  /** Tools this hat is NOT allowed to use (soft enforcement via prompt). */
-  disallowed_tools?: string[];
-  /** Max times this hat can be activated per loop run. */
-  max_activations?: number;
-}
-
-interface EventLoopConfig {
-  starting_event?: string;
-  completion_promise: string;
-  max_iterations: number;
-  max_runtime_seconds?: number;
-}
-
-interface PresetConfig {
-  event_loop: EventLoopConfig;
-  hats: Record<string, HatConfig>;
-  core?: {
-    specs_dir?: string;
-    guardrails?: string[];
-  };
-}
-
-interface LoopState {
-  presetName: string;
-  preset: PresetConfig;
-  currentHatKey: string | null;
-  iteration: number;
-  startTime: number;
-  prompt: string;
-  active: boolean;
-  cwd: string;
-  history: Array<{ hat: string; event: string; iteration: number }>;
-  /** Activation count per hat key for max_activations enforcement. */
-  activations: Record<string, number>;
-}
+import type { PresetConfig, LoopState } from "./lib.js";
+import {
+  parsePreset,
+  loadPresetsFromDir,
+  detectPublishedEvent,
+  containsCompletionPromise,
+  findHatForEvent,
+  buildHatInjection,
+} from "./lib.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -94,65 +58,6 @@ function getLastAssistantText(messages: AgentMessage[]): string {
 
 // ── Config Loading ─────────────────────────────────────────────────────────
 
-function loadPresetsFromDir(dir: string): Record<string, PresetConfig> {
-  const presets: Record<string, PresetConfig> = {};
-  if (!existsSync(dir)) return presets;
-
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return presets;
-  }
-
-  for (const entry of entries) {
-    if (!entry.endsWith(".yml") && !entry.endsWith(".yaml")) continue;
-    const filePath = join(dir, entry);
-    try {
-      const content = readFileSync(filePath, "utf-8");
-      const raw = yaml.load(content) as any;
-      if (!raw?.hats || !raw?.event_loop) continue;
-
-      const preset = parsePreset(raw);
-      if (preset) {
-        const name = entry.replace(/\.ya?ml$/, "");
-        presets[name] = preset;
-      }
-    } catch {
-      // Skip invalid files
-    }
-  }
-  return presets;
-}
-
-function parsePreset(raw: any): PresetConfig | null {
-  if (!raw?.hats || !raw?.event_loop) return null;
-
-  const hats: Record<string, HatConfig> = {};
-  for (const [key, val] of Object.entries(raw.hats)) {
-    const h = val as any;
-    hats[key] = {
-      name: h.name || key,
-      description: h.description || "",
-      triggers: Array.isArray(h.triggers) ? h.triggers : [],
-      publishes: Array.isArray(h.publishes) ? h.publishes : [],
-      default_publishes: h.default_publishes || undefined,
-      instructions: h.instructions || "",
-    };
-  }
-
-  return {
-    event_loop: {
-      starting_event: raw.event_loop.starting_event,
-      completion_promise: raw.event_loop.completion_promise || "LOOP_COMPLETE",
-      max_iterations: raw.event_loop.max_iterations || 50,
-      max_runtime_seconds: raw.event_loop.max_runtime_seconds,
-    },
-    hats,
-    core: raw.core,
-  };
-}
-
 function resolveBuiltinPresetsDir(): string {
   // jiti sets __dirname; ESM uses import.meta.url
   try {
@@ -177,44 +82,12 @@ function loadAllPresets(cwd: string): Record<string, PresetConfig> {
   return { ...builtins, ...user, ...project };
 }
 
-// ── Event Detection ────────────────────────────────────────────────────────
-
-const EVENT_PATTERN = />>>\s*EVENT:\s*(\S+)/i;
-const XML_EVENT_PATTERN = /<event\s+topic="([^"]+)"[^>]*>([\s\S]*?)<\/event>/gi;
-
-function detectPublishedEvent(text: string, hat: HatConfig): string | null {
-  // 1. Look for XML-style event tags (preferred, matches original Ralph)
-  const xmlMatches = [...text.matchAll(XML_EVENT_PATTERN)];
-  if (xmlMatches.length > 0) {
-    // Use the last XML event tag found
-    const lastMatch = xmlMatches[xmlMatches.length - 1];
-    const topic = lastMatch[1];
-    // Validate against hat's publishable events
-    if (hat.publishes.includes(topic)) return topic;
-    // Model used wrong event name — fall back to default
-    console.log(`[ralph] Event "${topic}" not in hat publishes [${hat.publishes.join(", ")}], using default`);
-    return hat.default_publishes || null;
-  }
-
-  // 2. Look for explicit >>> EVENT: name (legacy format)
-  const match = text.match(EVENT_PATTERN);
-  if (match) {
-    const eventName = match[1].replace(/\s*<<<?\s*$/, "");
-    if (hat.publishes.includes(eventName)) return eventName;
-    console.log(`[ralph] Event "${eventName}" not in hat publishes [${hat.publishes.join(", ")}], using default`);
-    return hat.default_publishes || null;
-  }
-
-  // 3. Fall back to default_publishes (no fuzzy matching — too error-prone)
-  return hat.default_publishes || null;
-}
+// ── Event Detection (wrappers over AgentMessage[]) ─────────────────────────
 
 /**
  * Search ALL assistant messages for a published event, not just the last one.
- * This handles cases where the model outputs an event early then keeps working.
  */
-function detectPublishedEventFromMessages(messages: AgentMessage[], hat: HatConfig): string | null {
-  // Scan messages in reverse — prefer the most recent event
+function detectPublishedEventFromMessages(messages: AgentMessage[], hat: import("./lib.js").HatConfig): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (isAssistantMessage(messages[i])) {
       const text = getAssistantText(messages[i] as AssistantMessage);
@@ -227,82 +100,15 @@ function detectPublishedEventFromMessages(messages: AgentMessage[], hat: HatConf
 
 /**
  * Check if any assistant message contains the completion promise.
- * Uses Ralph-style detection: promise must be on its own line, outside event tags.
  */
-function containsCompletionPromise(messages: AgentMessage[], promise: string): boolean {
+function containsCompletionPromiseInMessages(messages: AgentMessage[], promise: string): boolean {
+  const texts: string[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
     if (isAssistantMessage(messages[i])) {
-      const text = getAssistantText(messages[i] as AssistantMessage);
-      // Strip event tags to avoid false positives from event payloads
-      const stripped = text.replace(/<event\s[^>]*>[\s\S]*?<\/event>/gi, "");
-      // Check if promise appears as a standalone line
-      for (const line of stripped.split("\n").reverse()) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (trimmed === promise) return true;
-        // Also check for >>> PROMISE format
-        if (trimmed === `>>> ${promise}`) return true;
-        break; // Only check the last non-empty line per message
-      }
+      texts.push(getAssistantText(messages[i] as AssistantMessage));
     }
   }
-  return false;
-}
-
-function findHatForEvent(event: string, preset: PresetConfig): string | null {
-  for (const [key, hat] of Object.entries(preset.hats)) {
-    if (hat.triggers.includes(event)) return key;
-  }
-  return null;
-}
-
-// ── Hat Injection ──────────────────────────────────────────────────────────
-
-function buildHatInjection(hat: HatConfig, state: LoopState): string {
-  const { preset } = state;
-  const eventList = hat.publishes.map((e) => `  - ${e}`).join("\n");
-  const scratchpadPath = `${state.cwd}/.ralph/scratchpad.md`;
-
-  let injection = `\n## Ralph Orchestration — Hat: ${hat.name}\n`;
-  injection += `Iteration ${state.iteration}/${preset.event_loop.max_iterations}\n\n`;
-  injection += hat.instructions;
-
-  if (preset.core?.guardrails?.length) {
-    injection += "\n\n### Guardrails\n";
-    for (const g of preset.core.guardrails) {
-      injection += `- ${g}\n`;
-    }
-  }
-
-  if (hat.disallowed_tools?.length) {
-    injection += "\n\n### TOOL RESTRICTIONS\n";
-    injection += "You MUST NOT use these tools in this hat:\n";
-    for (const tool of hat.disallowed_tools) {
-      injection += `- **${tool}** — blocked for this hat\n`;
-    }
-    injection += "\nUsing a restricted tool is a scope violation.\n";
-  }
-
-  injection += `\n\n### Scratchpad\n`;
-  injection += `Each hat runs in a fresh session with no conversation history from previous hats.\n`;
-  injection += `Use the scratchpad file to pass context between hats:\n\n`;
-  injection += `**File:** \`${scratchpadPath}\`\n\n`;
-  injection += `- **Read it first** — the previous hat's notes are there\n`;
-  injection += `- **Write your notes** before publishing your event — the next hat will read them\n`;
-  injection += `- Include: what you did, what files you changed, any issues found, what the next hat needs to know\n`;
-
-  injection += `\n\n### Event Protocol\n`;
-  injection += `When you have completed ALL work for this hat, publish exactly ONE event using this XML format:\n\n`;
-  injection += `\`\`\`\n<event topic="event_name">Brief description of what was done</event>\n\`\`\`\n\n`;
-  injection += `You MUST use one of these EXACT event names (no other names are valid):\n${eventList}\n\n`;
-  injection += `**CRITICAL:** The event tag signals the END of your work for this hat. `;
-  injection += `Do ALL your work FIRST (implementation, tests, verification), THEN publish the event as your FINAL output. `;
-  injection += `Do NOT continue working after publishing an event.\n\n`;
-  injection += `When the ENTIRE task is fully complete (all work done, committed, and verified), instead output on its own line:\n`;
-  injection += `${preset.event_loop.completion_promise}\n\n`;
-  injection += `Do NOT output ${preset.event_loop.completion_promise} unless ALL work is truly finished.\n`;
-
-  return injection;
+  return containsCompletionPromise(texts, promise);
 }
 
 // ── PDD Plan Prompt ────────────────────────────────────────────────────────
@@ -461,6 +267,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
       cwd: ctx.cwd,
       history: [{ hat: startHatKey, event: startEvent || "start", iteration: 1 }],
       activations: { [startHatKey]: 1 },
+      steering: [],
     };
 
     // Capture newSession from command context for use in agent_end handler.
@@ -497,7 +304,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
   pi.registerCommand("ralph", {
     description: "Start a Ralph orchestration loop",
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["stop", "status", "presets"];
+      const subcommands = ["stop", "status", "steer", "presets"];
       const presetNames = Object.keys(presets);
       const all = [...subcommands, ...presetNames];
       const filtered = all.filter((s) => s.startsWith(prefix));
@@ -526,7 +333,27 @@ export default function ralphExtension(pi: ExtensionAPI) {
           `Preset: ${loopState.presetName}\n` +
             `Hat: ${hat?.name || loopState.currentHatKey}\n` +
             `Iteration: ${loopState.iteration}/${loopState.preset.event_loop.max_iterations}\n` +
-            `Elapsed: ${elapsed}s`,
+            `Elapsed: ${elapsed}s` +
+            (loopState.steering.length > 0 ? `\nPending steering: ${loopState.steering.length}` : ""),
+          "info",
+        );
+        return;
+      }
+
+      if (trimmed.startsWith("steer")) {
+        if (!loopState?.active) {
+          ctx.ui.notify("No active loop to steer", "warning");
+          return;
+        }
+        let message = trimmed.slice(5).trim();
+        if (!message) {
+          const input = await ctx.ui.input("Steering message:");
+          if (!input?.trim()) return;
+          message = input.trim();
+        }
+        loopState.steering.push(message);
+        ctx.ui.notify(
+          `Steering queued (${loopState.steering.length} pending). Will be injected into the next hat.`,
           "info",
         );
         return;
@@ -635,6 +462,10 @@ export default function ralphExtension(pi: ExtensionAPI) {
     if (!hat) return;
 
     const injection = buildHatInjection(hat, loopState);
+
+    // Clear steering after injection — it's been delivered
+    loopState.steering = [];
+
     return {
       systemPrompt: event.systemPrompt + "\n\n" + injection,
     };
@@ -663,7 +494,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
     const { preset } = loopState;
 
     // Check completion promise (scans all assistant messages)
-    if (containsCompletionPromise(event.messages, preset.event_loop.completion_promise)) {
+    if (containsCompletionPromiseInMessages(event.messages, preset.event_loop.completion_promise)) {
       completeLoop(ctx);
       return;
     }
@@ -763,6 +594,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
         startTime: loopState.startTime,
         prompt: loopState.prompt,
         history: loopState.history,
+        steering: loopState.steering,
       });
     }
   }
@@ -797,6 +629,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
           prompt: d.prompt,
           active: true,
           history: d.history || [],
+          steering: d.steering || [],
         };
         loopTriggeredTurn = true;
       }
