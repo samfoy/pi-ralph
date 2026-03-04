@@ -11,6 +11,7 @@ A [pi](https://github.com/mariozechner/pi-coding-agent) extension for hat-based 
 - **Event protocol** — hats publish events that trigger the next hat, forming an autonomous loop
 - **Guard rails** — max iterations, max runtime, and completion promises prevent runaway loops
 - **Session persistence** — loop state survives session restarts
+- **History & loops modals** — popup overlays to browse iteration history and past loop records
 
 ## Installation
 
@@ -44,6 +45,8 @@ pi will automatically discover and load the extension on next start.
 /ralph [preset] [prompt]   Start a loop (interactive picker if no args)
 /ralph stop                Stop the current loop
 /ralph status              Show loop status
+/ralph history             Show iteration history for the current loop
+/ralph loops               Browse past loop records
 /ralph presets             List available presets
 /plan [idea]               Start a PDD planning session
 ```
