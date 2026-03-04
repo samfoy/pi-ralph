@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
-import { matchesKey, Key, truncateToWidth } from "@mariozechner/pi-tui";
+import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 import type { PresetConfig, LoopState, LoopRecord } from "./lib.js";
 import {
@@ -409,25 +409,39 @@ export default function ralphExtension(pi: ExtensionAPI) {
           let currentIdx = logs.length - 1;
           let scrollOffset = 0;
 
+          function bordered(content: string[], width: number, title: string): string[] {
+            const inner = width - 2; // space inside the border chars
+            const titleText = ` ${title} `;
+            const topFill = Math.max(0, inner - titleText.length - 1);
+            const out: string[] = [];
+            out.push(theme.fg("border", "╭─") + theme.fg("accent", theme.bold(titleText)) + theme.fg("border", "─".repeat(topFill) + "╮"));
+            for (const line of content) {
+              const truncated = truncateToWidth(line, inner - 2);
+              const pad = Math.max(0, inner - 2 - visibleWidth(truncated));
+              out.push(theme.fg("border", "│") + " " + truncated + " ".repeat(pad) + " " + theme.fg("border", "│"));
+            }
+            out.push(theme.fg("border", "╰" + "─".repeat(inner) + "╯"));
+            return out;
+          }
+
           return {
             render(width: number): string[] {
               const log = logs[currentIdx];
-              const lines: string[] = [];
-              const rule = theme.fg("accent", "─".repeat(Math.min(width, 80)));
+              const inner = width - 4; // 2 border + 2 padding
+              const content: string[] = [];
 
-              lines.push(rule);
-              lines.push(
-                theme.fg("accent", theme.bold(` Iteration ${log.iteration}`)) +
+              content.push(
+                theme.fg("accent", theme.bold(`Iteration ${log.iteration}`)) +
                 theme.fg("dim", ` (${currentIdx + 1}/${logs.length})`)
               );
-              lines.push("");
-              lines.push(theme.fg("muted", "  Hat: ") + theme.fg("text", log.hatName));
-              lines.push(theme.fg("muted", "  Event: ") + theme.fg("text", log.event));
-              lines.push(
-                theme.fg("muted", "  Time: ") +
+              content.push("");
+              content.push(theme.fg("muted", "Hat: ") + theme.fg("text", log.hatName));
+              content.push(theme.fg("muted", "Event: ") + theme.fg("text", log.event));
+              content.push(
+                theme.fg("muted", "Time: ") +
                 theme.fg("dim", new Date(log.timestamp).toLocaleTimeString())
               );
-              lines.push("");
+              content.push("");
 
               const summaryLines = log.summary.split("\n");
               const maxVisible = 20;
@@ -436,24 +450,23 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
               const visible = summaryLines.slice(scrollOffset, scrollOffset + maxVisible);
               for (const line of visible) {
-                lines.push("  " + truncateToWidth(line, width - 4));
+                content.push(truncateToWidth(line, inner));
               }
 
               if (summaryLines.length > maxVisible) {
-                lines.push("");
-                lines.push(
+                content.push("");
+                content.push(
                   theme.fg("dim",
-                    `  [${scrollOffset + 1}-${Math.min(scrollOffset + maxVisible, summaryLines.length)}` +
+                    `[${scrollOffset + 1}-${Math.min(scrollOffset + maxVisible, summaryLines.length)}` +
                     `/${summaryLines.length} lines]`
                   )
                 );
               }
 
-              lines.push("");
-              lines.push(rule);
-              lines.push(theme.fg("dim", "  \u2190/\u2192 iteration \u2022 \u2191/\u2193 scroll \u2022 esc close"));
+              content.push("");
+              content.push(theme.fg("dim", "←/→ iteration • ↑/↓ scroll • esc close"));
 
-              return lines;
+              return bordered(content, width, "Ralph History");
             },
             invalidate() {},
             handleInput(data: string) {
@@ -473,6 +486,14 @@ export default function ralphExtension(pi: ExtensionAPI) {
               tui.requestRender();
             },
           };
+        }, {
+          overlay: true,
+          overlayOptions: {
+            anchor: "center",
+            width: "70%",
+            minWidth: 50,
+            maxHeight: "80%",
+          },
         });
         return;
       }
