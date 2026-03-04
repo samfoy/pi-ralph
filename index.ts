@@ -394,6 +394,21 @@ export default function ralphExtension(pi: ExtensionAPI) {
         return;
       }
 
+      function bordered(content: string[], width: number, title: string, theme: any): string[] {
+        const inner = width - 2; // space inside the border chars
+        const titleText = ` ${title} `;
+        const topFill = Math.max(0, inner - titleText.length - 1);
+        const out: string[] = [];
+        out.push(theme.fg("border", "╭─") + theme.fg("accent", theme.bold(titleText)) + theme.fg("border", "─".repeat(topFill) + "╮"));
+        for (const line of content) {
+          const truncated = truncateToWidth(line, inner - 2);
+          const pad = Math.max(0, inner - 2 - visibleWidth(truncated));
+          out.push(theme.fg("border", "│") + " " + truncated + " ".repeat(pad) + " " + theme.fg("border", "│"));
+        }
+        out.push(theme.fg("border", "╰" + "─".repeat(inner) + "╯"));
+        return out;
+      }
+
       if (trimmed === "history") {
         if (!loopState) {
           ctx.ui.notify("No loop state available", "info");
@@ -408,21 +423,6 @@ export default function ralphExtension(pi: ExtensionAPI) {
         await ctx.ui.custom<void>((tui, theme, _kb, done) => {
           let currentIdx = logs.length - 1;
           let scrollOffset = 0;
-
-          function bordered(content: string[], width: number, title: string): string[] {
-            const inner = width - 2; // space inside the border chars
-            const titleText = ` ${title} `;
-            const topFill = Math.max(0, inner - titleText.length - 1);
-            const out: string[] = [];
-            out.push(theme.fg("border", "╭─") + theme.fg("accent", theme.bold(titleText)) + theme.fg("border", "─".repeat(topFill) + "╮"));
-            for (const line of content) {
-              const truncated = truncateToWidth(line, inner - 2);
-              const pad = Math.max(0, inner - 2 - visibleWidth(truncated));
-              out.push(theme.fg("border", "│") + " " + truncated + " ".repeat(pad) + " " + theme.fg("border", "│"));
-            }
-            out.push(theme.fg("border", "╰" + "─".repeat(inner) + "╯"));
-            return out;
-          }
 
           return {
             render(width: number): string[] {
@@ -466,7 +466,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
               content.push("");
               content.push(theme.fg("dim", "←/→ iteration • ↑/↓ scroll • esc close"));
 
-              return bordered(content, width, "Ralph History");
+              return bordered(content, width, "Ralph History", theme);
             },
             invalidate() {},
             handleInput(data: string) {
@@ -522,14 +522,13 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
           return {
             render(width: number): string[] {
-              const lines: string[] = [];
-              const rule = theme.fg("accent", "─".repeat(Math.min(width, 80)));
+              const content: string[] = [];
+              const inner = width - 4; // 2 border + 2 padding
 
               if (!detailMode) {
                 // List view
-                lines.push(rule);
-                lines.push(theme.fg("accent", theme.bold(" Past Ralph Loops")) + theme.fg("dim", ` (${records.length})`));
-                lines.push("");
+                content.push(theme.fg("accent", theme.bold("Past Ralph Loops")) + theme.fg("dim", ` (${records.length})`));
+                content.push("");
 
                 const maxVisible = 15;
                 const maxScroll = Math.max(0, records.length - maxVisible);
@@ -543,54 +542,54 @@ export default function ralphExtension(pi: ExtensionAPI) {
                   const date = new Date(r.startTime).toLocaleString();
                   const dur = formatDuration(r.endTime - r.startTime);
                   const outcomeColor = r.outcome.includes("✓") ? "accent" : "warning";
-                  lines.push(
+                  content.push(
                     theme.fg(idx === selectedIdx ? "accent" : "text",
                       `${cursor} ${r.presetName}`) +
                     theme.fg("dim", ` — ${date} — ${dur} — ${r.iterations} iters`),
                   );
-                  lines.push(
-                    "    " + theme.fg(outcomeColor, r.outcome) +
-                    theme.fg("dim", ` — ${truncateToWidth(r.prompt, width - 20)}`),
+                  content.push(
+                    "  " + theme.fg(outcomeColor, r.outcome) +
+                    theme.fg("dim", ` — ${truncateToWidth(r.prompt, inner - 10)}`),
                   );
                 }
 
-                lines.push("");
-                lines.push(rule);
-                lines.push(theme.fg("dim", "  ↑/↓ select • enter view • esc close"));
+                content.push("");
+                content.push(theme.fg("dim", "↑/↓ select • enter view • esc close"));
+
+                return bordered(content, width, "Ralph Loops", theme);
               } else {
                 // Detail view — browse iteration logs of selected loop
                 const record = records[selectedIdx];
                 const logs = record.iterationLogs;
 
-                lines.push(rule);
-                lines.push(
-                  theme.fg("accent", theme.bold(` ${record.presetName}`)) +
+                content.push(
+                  theme.fg("accent", theme.bold(record.presetName)) +
                   theme.fg("dim", ` — ${new Date(record.startTime).toLocaleString()}`),
                 );
-                lines.push(theme.fg("muted", `  Prompt: `) + theme.fg("text", truncateToWidth(record.prompt, width - 12)));
-                lines.push(theme.fg("muted", `  Outcome: `) + theme.fg("text", record.outcome));
-                lines.push(
-                  theme.fg("muted", `  Duration: `) +
+                content.push(theme.fg("muted", "Prompt: ") + theme.fg("text", truncateToWidth(record.prompt, inner - 10)));
+                content.push(theme.fg("muted", "Outcome: ") + theme.fg("text", record.outcome));
+                content.push(
+                  theme.fg("muted", "Duration: ") +
                   theme.fg("text", formatDuration(record.endTime - record.startTime)) +
                   theme.fg("dim", ` — ${record.iterations} iterations`),
                 );
-                lines.push("");
+                content.push("");
 
                 if (logs.length === 0) {
-                  lines.push(theme.fg("dim", "  No iteration logs recorded."));
+                  content.push(theme.fg("dim", "No iteration logs recorded."));
                 } else {
                   const log = logs[logIdx];
-                  lines.push(
-                    theme.fg("accent", theme.bold(`  Iteration ${log.iteration}`)) +
+                  content.push(
+                    theme.fg("accent", theme.bold(`Iteration ${log.iteration}`)) +
                     theme.fg("dim", ` (${logIdx + 1}/${logs.length})`),
                   );
-                  lines.push(theme.fg("muted", "  Hat: ") + theme.fg("text", log.hatName));
-                  lines.push(theme.fg("muted", "  Event: ") + theme.fg("text", log.event));
-                  lines.push(
-                    theme.fg("muted", "  Time: ") +
+                  content.push(theme.fg("muted", "Hat: ") + theme.fg("text", log.hatName));
+                  content.push(theme.fg("muted", "Event: ") + theme.fg("text", log.event));
+                  content.push(
+                    theme.fg("muted", "Time: ") +
                     theme.fg("dim", new Date(log.timestamp).toLocaleTimeString()),
                   );
-                  lines.push("");
+                  content.push("");
 
                   const summaryLines = log.summary.split("\n");
                   const maxVisible = 16;
@@ -599,25 +598,24 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
                   const visibleLines = summaryLines.slice(logScrollOffset, logScrollOffset + maxVisible);
                   for (const line of visibleLines) {
-                    lines.push("  " + truncateToWidth(line, width - 4));
+                    content.push(truncateToWidth(line, inner));
                   }
 
                   if (summaryLines.length > maxVisible) {
-                    lines.push("");
-                    lines.push(
+                    content.push("");
+                    content.push(
                       theme.fg("dim",
-                        `  [${logScrollOffset + 1}-${Math.min(logScrollOffset + maxVisible, summaryLines.length)}` +
+                        `[${logScrollOffset + 1}-${Math.min(logScrollOffset + maxVisible, summaryLines.length)}` +
                         `/${summaryLines.length} lines]`),
                     );
                   }
                 }
 
-                lines.push("");
-                lines.push(rule);
-                lines.push(theme.fg("dim", "  ←/→ iteration • ↑/↓ scroll • esc back"));
-              }
+                content.push("");
+                content.push(theme.fg("dim", "←/→ iteration • ↑/↓ scroll • esc back"));
 
-              return lines;
+                return bordered(content, width, "Ralph Loops", theme);
+              }
             },
             invalidate() {},
             handleInput(data: string) {
@@ -657,6 +655,14 @@ export default function ralphExtension(pi: ExtensionAPI) {
               tui.requestRender();
             },
           };
+        }, {
+          overlay: true,
+          overlayOptions: {
+            anchor: "center",
+            width: "70%",
+            minWidth: 50,
+            maxHeight: "80%",
+          },
         });
         return;
       }
