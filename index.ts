@@ -194,14 +194,18 @@ export default function ralphExtension(pi: ExtensionAPI) {
       const hat = loopState.preset.hats[loopState.currentHatKey];
       const hatName = hat?.name || loopState.currentHatKey;
       const iter = `${loopState.iteration}/${loopState.preset.event_loop.max_iterations}`;
+      const pauseIndicator = loopState.paused ? " " + ctx.ui.theme.fg("warning", "⏸ PAUSED") : "";
       ctx.ui.setStatus(
         "ralph",
-        ctx.ui.theme.fg("accent", `🎩 ${hatName}`) + ctx.ui.theme.fg("muted", ` [${iter}]`),
+        ctx.ui.theme.fg("accent", `🎩 ${hatName}`) + ctx.ui.theme.fg("muted", ` [${iter}]`) + pauseIndicator,
       );
 
       // Widget showing hat history
       const lines: string[] = [];
-      lines.push(ctx.ui.theme.fg("accent", `Ralph Loop: ${loopState.presetName}`));
+      const loopTitle = loopState.paused 
+        ? ctx.ui.theme.fg("warning", `Ralph Loop: ${loopState.presetName} ⏸ PAUSED`)
+        : ctx.ui.theme.fg("accent", `Ralph Loop: ${loopState.presetName}`);
+      lines.push(loopTitle);
       for (const h of loopState.history.slice(-6)) {
         const icon = h.hat === loopState.currentHatKey ? "▸" : " ";
         const name = loopState.preset.hats[h.hat]?.name || h.hat;
@@ -342,7 +346,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
   pi.registerCommand("ralph", {
     description: "Start a Ralph orchestration loop",
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["stop", "status", "steer", "history", "loops", "presets"];
+      const subcommands = ["stop", "status", "steer", "pause", "resume", "history", "loops", "presets"];
       const presetNames = Object.keys(presets);
       const all = [...subcommands, ...presetNames];
       const filtered = all.filter((s) => s.startsWith(prefix));
@@ -367,11 +371,13 @@ export default function ralphExtension(pi: ExtensionAPI) {
         }
         const hat = loopState.preset.hats[loopState.currentHatKey!];
         const elapsed = Math.round((Date.now() - loopState.startTime) / 1000);
+        const pausedStatus = loopState.paused ? "\nStatus: ⏸ PAUSED" : "";
         ctx.ui.notify(
           `Preset: ${loopState.presetName}\n` +
             `Hat: ${hat?.name || loopState.currentHatKey}\n` +
             `Iteration: ${loopState.iteration}/${loopState.preset.event_loop.max_iterations}\n` +
             `Elapsed: ${elapsed}s` +
+            pausedStatus +
             (loopState.steering.length > 0 ? `\nPending steering: ${loopState.steering.length}` : ""),
           "info",
         );
@@ -394,6 +400,38 @@ export default function ralphExtension(pi: ExtensionAPI) {
           `Steering queued (${loopState.steering.length} pending). Will be injected into the next hat.`,
           "info",
         );
+        return;
+      }
+
+      if (trimmed === "pause") {
+        if (!loopState?.active) {
+          ctx.ui.notify("No active loop to pause", "warning");
+          return;
+        }
+        loopState.paused = true;
+        updateStatus(ctx);
+        persistState();
+        ctx.ui.notify(
+          "⏸ Loop paused. The loop will not auto-continue after this turn. " +
+            "Use /ralph resume to continue or send any message.",
+          "info",
+        );
+        return;
+      }
+
+      if (trimmed === "resume") {
+        if (!loopState?.active) {
+          ctx.ui.notify("No active loop to resume", "warning");
+          return;
+        }
+        if (!loopState.paused) {
+          ctx.ui.notify("Loop is not paused", "info");
+          return;
+        }
+        loopState.paused = false;
+        updateStatus(ctx);
+        persistState();
+        ctx.ui.notify("▶ Loop resumed. Will continue after this turn completes.", "info");
         return;
       }
 
@@ -796,8 +834,21 @@ export default function ralphExtension(pi: ExtensionAPI) {
     // Only auto-continue if this turn was triggered by the loop
     if (!loopTriggeredTurn) {
       // User sent a manual message during the loop — treat as steering.
+      // If the loop was paused, auto-resume it.
+      if (loopState.paused) {
+        loopState.paused = false;
+        updateStatus(ctx);
+        persistState();
+        ctx.ui.notify("▶ Loop auto-resumed after user message", "info");
+      }
       // Next agent_end after a loop-triggered turn will continue.
       loopTriggeredTurn = true; // Re-arm for next turn
+      return;
+    }
+
+    // Check if loop is paused (after handling user messages)
+    if (loopState.paused) {
+      // Don't auto-continue. User can resume with /ralph resume or by sending a message.
       return;
     }
 
