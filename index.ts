@@ -223,6 +223,18 @@ export default function ralphExtension(pi: ExtensionAPI) {
     const iterations = loopState.iteration;
     const elapsed = Math.round((Date.now() - loopState.startTime) / 1000);
     loopState.active = false;
+    // Persist terminal state so session_start knows the loop completed
+    pi.appendEntry("ralph-loop-state", {
+      presetName: loopState.presetName,
+      currentHatKey: loopState.currentHatKey,
+      iteration: loopState.iteration,
+      startTime: loopState.startTime,
+      prompt: loopState.prompt,
+      history: loopState.history,
+      steering: loopState.steering,
+      iterationLogs: loopState.iterationLogs,
+      active: false,
+    });
     loopState = null;
     loopTriggeredTurn = false;
     updateStatus(ctx);
@@ -721,6 +733,8 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
     if (stateEntry?.data) {
       const d = stateEntry.data;
+      // Don't restore completed/stopped loops
+      if (d.active === false) return;
       const preset = presets[d.presetName];
       if (preset) {
         loopState = {
