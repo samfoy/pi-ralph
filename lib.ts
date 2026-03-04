@@ -65,6 +65,7 @@ export interface LoopState {
   startTime: number;
   prompt: string;
   active: boolean;
+  paused: boolean;
   cwd: string;
   history: Array<{ hat: string; event: string; iteration: number }>;
   activations: Record<string, number>;

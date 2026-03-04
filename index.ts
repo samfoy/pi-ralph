@@ -252,9 +252,11 @@ export default function ralphExtension(pi: ExtensionAPI) {
       startTime: loopState.startTime,
       prompt: loopState.prompt,
       history: loopState.history,
+      activations: loopState.activations,
       steering: loopState.steering,
       iterationLogs: loopState.iterationLogs,
       active: false,
+      paused: loopState.paused,
     });
     loopState = null;
     loopTriggeredTurn = false;
@@ -298,6 +300,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
       startTime: Date.now(),
       prompt,
       active: true,
+      paused: false,
       cwd: ctx.cwd,
       history: [{ hat: startHatKey, event: startEvent || "start", iteration: 1 }],
       activations: { [startHatKey]: 1 },
@@ -919,9 +922,11 @@ export default function ralphExtension(pi: ExtensionAPI) {
         startTime: loopState.startTime,
         prompt: loopState.prompt,
         history: loopState.history,
+        activations: loopState.activations,
         steering: loopState.steering,
         iterationLogs: loopState.iterationLogs,
         active: true,
+        paused: loopState.paused,
       });
     }
   }
@@ -958,7 +963,10 @@ export default function ralphExtension(pi: ExtensionAPI) {
           startTime: d.startTime,
           prompt: d.prompt,
           active: true,
+          paused: d.paused || false,
+          cwd: ctx.cwd,
           history: d.history || [],
+          activations: d.activations || {},
           steering: d.steering || [],
           iterationLogs: d.iterationLogs || [],
         };
