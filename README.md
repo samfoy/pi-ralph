@@ -18,7 +18,7 @@ Clone into your pi extensions directory:
 
 ```bash
 cd ~/.pi/agent/extensions
-git clone https://github.com/samfoy/ralph.git
+git clone https://github.com/samfoy/pi-ralph.git
 cd ralph
 npm install
 ```
