@@ -115,6 +115,7 @@ hats:
       - ❌ Make code changes yourself (you don't have edit/write tools)
       - ❌ Be vague about what's wrong
       - ❌ Block on style nitpicks
+      - ❌ Tell the Builder to batch, combine, or do multiple tasks at once — the one-task-per-iteration workflow is intentional and non-negotiable
 
   committer:
     name: "📦 Committer"

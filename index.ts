@@ -25,10 +25,12 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import { matchesKey, Key, truncateToWidth } from "@mariozechner/pi-tui";
 
-import type { PresetConfig, LoopState } from "./lib.js";
+import type { PresetConfig, LoopState, LoopRecord } from "./lib.js";
 import {
   parsePreset,
   loadPresetsFromDir,
+  loadLoopRecords,
+  saveLoopRecord,
   detectPublishedEvent,
   containsCompletionPromise,
   findHatForEvent,
@@ -222,6 +224,25 @@ export default function ralphExtension(pi: ExtensionAPI) {
     if (!loopState) return;
     const iterations = loopState.iteration;
     const elapsed = Math.round((Date.now() - loopState.startTime) / 1000);
+
+    // Save loop record to disk for later exploration
+    const record: LoopRecord = {
+      id: `${loopState.startTime}-${loopState.presetName}`,
+      presetName: loopState.presetName,
+      prompt: loopState.prompt,
+      startTime: loopState.startTime,
+      endTime: Date.now(),
+      outcome: reason,
+      iterations,
+      history: loopState.history,
+      iterationLogs: loopState.iterationLogs,
+    };
+    try {
+      saveLoopRecord(loopState.cwd, record);
+    } catch {
+      // Don't let save failure block loop shutdown
+    }
+
     loopState.active = false;
     // Persist terminal state so session_start knows the loop completed
     pi.appendEntry("ralph-loop-state", {
@@ -318,7 +339,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
   pi.registerCommand("ralph", {
     description: "Start a Ralph orchestration loop",
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["stop", "status", "steer", "history", "presets"];
+      const subcommands = ["stop", "status", "steer", "history", "loops", "presets"];
       const presetNames = Object.keys(presets);
       const all = [...subcommands, ...presetNames];
       const filtered = all.filter((s) => s.startsWith(prefix));
@@ -448,6 +469,169 @@ export default function ralphExtension(pi: ExtensionAPI) {
                 scrollOffset = Math.max(0, scrollOffset - 1);
               } else if (matchesKey(data, Key.down)) {
                 scrollOffset++;
+              }
+              tui.requestRender();
+            },
+          };
+        });
+        return;
+      }
+
+      if (trimmed === "loops") {
+        const records = loadLoopRecords(ctx.cwd);
+        if (records.length === 0) {
+          ctx.ui.notify("No past loops found", "info");
+          return;
+        }
+
+        await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+          let selectedIdx = 0;
+          let listScrollOffset = 0;
+          let detailMode = false;
+          let logIdx = 0;
+          let logScrollOffset = 0;
+
+          function formatDuration(ms: number): string {
+            const s = Math.round(ms / 1000);
+            if (s < 60) return `${s}s`;
+            const m = Math.floor(s / 60);
+            const rem = s % 60;
+            return `${m}m${rem}s`;
+          }
+
+          return {
+            render(width: number): string[] {
+              const lines: string[] = [];
+              const rule = theme.fg("accent", "─".repeat(Math.min(width, 80)));
+
+              if (!detailMode) {
+                // List view
+                lines.push(rule);
+                lines.push(theme.fg("accent", theme.bold(" Past Ralph Loops")) + theme.fg("dim", ` (${records.length})`));
+                lines.push("");
+
+                const maxVisible = 15;
+                const maxScroll = Math.max(0, records.length - maxVisible);
+                listScrollOffset = Math.min(listScrollOffset, maxScroll);
+                const visible = records.slice(listScrollOffset, listScrollOffset + maxVisible);
+
+                for (let i = 0; i < visible.length; i++) {
+                  const idx = listScrollOffset + i;
+                  const r = visible[i];
+                  const cursor = idx === selectedIdx ? "▸" : " ";
+                  const date = new Date(r.startTime).toLocaleString();
+                  const dur = formatDuration(r.endTime - r.startTime);
+                  const outcomeColor = r.outcome.includes("✓") ? "accent" : "warning";
+                  lines.push(
+                    theme.fg(idx === selectedIdx ? "accent" : "text",
+                      `${cursor} ${r.presetName}`) +
+                    theme.fg("dim", ` — ${date} — ${dur} — ${r.iterations} iters`),
+                  );
+                  lines.push(
+                    "    " + theme.fg(outcomeColor, r.outcome) +
+                    theme.fg("dim", ` — ${truncateToWidth(r.prompt, width - 20)}`),
+                  );
+                }
+
+                lines.push("");
+                lines.push(rule);
+                lines.push(theme.fg("dim", "  ↑/↓ select • enter view • esc close"));
+              } else {
+                // Detail view — browse iteration logs of selected loop
+                const record = records[selectedIdx];
+                const logs = record.iterationLogs;
+
+                lines.push(rule);
+                lines.push(
+                  theme.fg("accent", theme.bold(` ${record.presetName}`)) +
+                  theme.fg("dim", ` — ${new Date(record.startTime).toLocaleString()}`),
+                );
+                lines.push(theme.fg("muted", `  Prompt: `) + theme.fg("text", truncateToWidth(record.prompt, width - 12)));
+                lines.push(theme.fg("muted", `  Outcome: `) + theme.fg("text", record.outcome));
+                lines.push(
+                  theme.fg("muted", `  Duration: `) +
+                  theme.fg("text", formatDuration(record.endTime - record.startTime)) +
+                  theme.fg("dim", ` — ${record.iterations} iterations`),
+                );
+                lines.push("");
+
+                if (logs.length === 0) {
+                  lines.push(theme.fg("dim", "  No iteration logs recorded."));
+                } else {
+                  const log = logs[logIdx];
+                  lines.push(
+                    theme.fg("accent", theme.bold(`  Iteration ${log.iteration}`)) +
+                    theme.fg("dim", ` (${logIdx + 1}/${logs.length})`),
+                  );
+                  lines.push(theme.fg("muted", "  Hat: ") + theme.fg("text", log.hatName));
+                  lines.push(theme.fg("muted", "  Event: ") + theme.fg("text", log.event));
+                  lines.push(
+                    theme.fg("muted", "  Time: ") +
+                    theme.fg("dim", new Date(log.timestamp).toLocaleTimeString()),
+                  );
+                  lines.push("");
+
+                  const summaryLines = log.summary.split("\n");
+                  const maxVisible = 16;
+                  const maxScroll = Math.max(0, summaryLines.length - maxVisible);
+                  logScrollOffset = Math.min(logScrollOffset, maxScroll);
+
+                  const visibleLines = summaryLines.slice(logScrollOffset, logScrollOffset + maxVisible);
+                  for (const line of visibleLines) {
+                    lines.push("  " + truncateToWidth(line, width - 4));
+                  }
+
+                  if (summaryLines.length > maxVisible) {
+                    lines.push("");
+                    lines.push(
+                      theme.fg("dim",
+                        `  [${logScrollOffset + 1}-${Math.min(logScrollOffset + maxVisible, summaryLines.length)}` +
+                        `/${summaryLines.length} lines]`),
+                    );
+                  }
+                }
+
+                lines.push("");
+                lines.push(rule);
+                lines.push(theme.fg("dim", "  ←/→ iteration • ↑/↓ scroll • esc back"));
+              }
+
+              return lines;
+            },
+            invalidate() {},
+            handleInput(data: string) {
+              if (matchesKey(data, Key.escape)) {
+                if (detailMode) {
+                  detailMode = false;
+                  logIdx = 0;
+                  logScrollOffset = 0;
+                } else {
+                  done();
+                }
+              } else if (!detailMode) {
+                if (matchesKey(data, Key.up) && selectedIdx > 0) {
+                  selectedIdx--;
+                  if (selectedIdx < listScrollOffset) listScrollOffset = selectedIdx;
+                } else if (matchesKey(data, Key.down) && selectedIdx < records.length - 1) {
+                  selectedIdx++;
+                  if (selectedIdx >= listScrollOffset + 15) listScrollOffset = selectedIdx - 14;
+                } else if (matchesKey(data, Key.enter)) {
+                  detailMode = true;
+                  logIdx = 0;
+                  logScrollOffset = 0;
+                }
+              } else {
+                if (matchesKey(data, Key.left) && logIdx > 0) {
+                  logIdx--;
+                  logScrollOffset = 0;
+                } else if (matchesKey(data, Key.right) && logIdx < records[selectedIdx].iterationLogs.length - 1) {
+                  logIdx++;
+                  logScrollOffset = 0;
+                } else if (matchesKey(data, Key.up)) {
+                  logScrollOffset = Math.max(0, logScrollOffset - 1);
+                } else if (matchesKey(data, Key.down)) {
+                  logScrollOffset++;
+                }
               }
               tui.requestRender();
             },
@@ -710,6 +894,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
         history: loopState.history,
         steering: loopState.steering,
         iterationLogs: loopState.iterationLogs,
+        active: true,
       });
     }
   }
@@ -733,8 +918,9 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
     if (stateEntry?.data) {
       const d = stateEntry.data;
-      // Don't restore completed/stopped loops
-      if (d.active === false) return;
+      // Only restore explicitly active loops — old entries without the field
+      // (or entries marked active: false by stopLoop) are skipped
+      if (d.active !== true) return;
       const preset = presets[d.presetName];
       if (preset) {
         loopState = {

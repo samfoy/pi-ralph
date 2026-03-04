@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import {
   parsePreset,
   loadPresetsFromDir,
+  saveLoopRecord,
+  loadLoopRecords,
   detectPublishedEvent,
   containsCompletionPromise,
   findHatForEvent,
@@ -11,6 +13,7 @@ import {
   type HatConfig,
   type PresetConfig,
   type LoopState,
+  type LoopRecord,
 } from "./lib.js";
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -442,6 +445,148 @@ hats:
       writeFileSync(join(tmpDir, "alt.yaml"), content);
       const presets = loadPresetsFromDir(tmpDir);
       expect(Object.keys(presets)).toEqual(["alt"]);
+    } finally {
+      teardown();
+    }
+  });
+});
+
+// ── Loop Record helpers ────────────────────────────────────────────────────
+
+function makeLoopRecord(overrides: Partial<LoopRecord> = {}): LoopRecord {
+  return {
+    id: "123-test",
+    presetName: "feature",
+    prompt: "Add a widget",
+    startTime: 1700000000000,
+    endTime: 1700000060000,
+    outcome: "Task complete ✓",
+    iterations: 3,
+    history: [{ hat: "builder", event: "start", iteration: 1 }],
+    iterationLogs: [
+      {
+        iteration: 1,
+        hatKey: "builder",
+        hatName: "Builder",
+        event: "build.done",
+        summary: "Built the widget",
+        timestamp: 1700000030000,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+// ── saveLoopRecord / loadLoopRecords ───────────────────────────────────────
+
+describe("saveLoopRecord", () => {
+  const tmpDir = join("/tmp", "ralph-test-save-" + process.pid);
+
+  function teardown() {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  it("creates .ralph/loops/ and writes a JSON file", () => {
+    try {
+      const record = makeLoopRecord();
+      const filePath = saveLoopRecord(tmpDir, record);
+      expect(filePath).toContain(".ralph/loops/");
+      expect(filePath).toContain("feature.json");
+      const content = JSON.parse(readFileSync(filePath, "utf-8"));
+      expect(content.presetName).toBe("feature");
+      expect(content.prompt).toBe("Add a widget");
+      expect(content.iterations).toBe(3);
+    } finally {
+      teardown();
+    }
+  });
+
+  it("sanitizes preset name in filename", () => {
+    try {
+      const record = makeLoopRecord({ presetName: "my/weird preset!" });
+      const filePath = saveLoopRecord(tmpDir, record);
+      expect(filePath).not.toContain("/weird");
+      expect(filePath).toContain("my_weird_preset_.json");
+    } finally {
+      teardown();
+    }
+  });
+
+  it("writes pretty-printed JSON", () => {
+    try {
+      const record = makeLoopRecord();
+      const filePath = saveLoopRecord(tmpDir, record);
+      const raw = readFileSync(filePath, "utf-8");
+      expect(raw).toContain("\n"); // multi-line = pretty-printed
+      expect(raw).toContain("  "); // indented
+    } finally {
+      teardown();
+    }
+  });
+});
+
+describe("loadLoopRecords", () => {
+  const tmpDir = join("/tmp", "ralph-test-load-" + process.pid);
+
+  function teardown() {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  it("returns empty array for nonexistent directory", () => {
+    expect(loadLoopRecords("/tmp/does-not-exist-ralph-load")).toEqual([]);
+  });
+
+  it("loads and sorts records by startTime descending", () => {
+    try {
+      const older = makeLoopRecord({ startTime: 1700000000000, presetName: "older" });
+      const newer = makeLoopRecord({ startTime: 1700000100000, presetName: "newer" });
+      saveLoopRecord(tmpDir, older);
+      saveLoopRecord(tmpDir, newer);
+
+      const records = loadLoopRecords(tmpDir);
+      expect(records.length).toBe(2);
+      expect(records[0].presetName).toBe("newer");
+      expect(records[1].presetName).toBe("older");
+    } finally {
+      teardown();
+    }
+  });
+
+  it("skips non-JSON files", () => {
+    try {
+      saveLoopRecord(tmpDir, makeLoopRecord());
+      writeFileSync(join(tmpDir, ".ralph", "loops", "readme.txt"), "not json");
+
+      const records = loadLoopRecords(tmpDir);
+      expect(records.length).toBe(1);
+    } finally {
+      teardown();
+    }
+  });
+
+  it("skips invalid JSON files", () => {
+    try {
+      const loopsDir = join(tmpDir, ".ralph", "loops");
+      mkdirSync(loopsDir, { recursive: true });
+      writeFileSync(join(loopsDir, "bad.json"), "not valid json{{{");
+      saveLoopRecord(tmpDir, makeLoopRecord());
+
+      const records = loadLoopRecords(tmpDir);
+      expect(records.length).toBe(1);
+    } finally {
+      teardown();
+    }
+  });
+
+  it("skips JSON files missing required fields", () => {
+    try {
+      const loopsDir = join(tmpDir, ".ralph", "loops");
+      mkdirSync(loopsDir, { recursive: true });
+      writeFileSync(join(loopsDir, "empty.json"), JSON.stringify({ foo: "bar" }));
+      saveLoopRecord(tmpDir, makeLoopRecord());
+
+      const records = loadLoopRecords(tmpDir);
+      expect(records.length).toBe(1);
     } finally {
       teardown();
     }

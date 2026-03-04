@@ -3,7 +3,7 @@
  * No pi API dependencies — just types, parsing, and event detection.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import yaml from "js-yaml";
 
@@ -43,6 +43,18 @@ export interface IterationLog {
   event: string;
   summary: string;
   timestamp: number;
+}
+
+export interface LoopRecord {
+  id: string;
+  presetName: string;
+  prompt: string;
+  startTime: number;
+  endTime: number;
+  outcome: string;
+  iterations: number;
+  history: Array<{ hat: string; event: string; iteration: number }>;
+  iterationLogs: IterationLog[];
 }
 
 export interface LoopState {
@@ -121,6 +133,49 @@ export function loadPresetsFromDir(dir: string): Record<string, PresetConfig> {
     }
   }
   return presets;
+}
+
+// ── Loop Records ───────────────────────────────────────────────────────────
+
+export function saveLoopRecord(dir: string, record: LoopRecord): string {
+  const loopsDir = join(dir, ".ralph", "loops");
+  mkdirSync(loopsDir, { recursive: true });
+  const ts = new Date(record.startTime).toISOString().replace(/[:.]/g, "-");
+  const safeName = record.presetName.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const filename = `${ts}-${safeName}.json`;
+  const filePath = join(loopsDir, filename);
+  writeFileSync(filePath, JSON.stringify(record, null, 2));
+  return filePath;
+}
+
+export function loadLoopRecords(dir: string): LoopRecord[] {
+  const loopsDir = join(dir, ".ralph", "loops");
+  if (!existsSync(loopsDir)) return [];
+
+  let entries: string[];
+  try {
+    entries = readdirSync(loopsDir);
+  } catch {
+    return [];
+  }
+
+  const records: LoopRecord[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) continue;
+    try {
+      const content = readFileSync(join(loopsDir, entry), "utf-8");
+      const record = JSON.parse(content) as LoopRecord;
+      if (record.startTime && record.presetName) {
+        records.push(record);
+      }
+    } catch {
+      // Skip invalid files
+    }
+  }
+
+  // Sort by startTime descending (newest first)
+  records.sort((a, b) => b.startTime - a.startTime);
+  return records;
 }
 
 // ── Event Detection ────────────────────────────────────────────────────────
