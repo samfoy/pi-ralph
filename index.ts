@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
+import { matchesKey, Key, truncateToWidth } from "@mariozechner/pi-tui";
 
 import type { PresetConfig, LoopState } from "./lib.js";
 import {
@@ -268,6 +269,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
       history: [{ hat: startHatKey, event: startEvent || "start", iteration: 1 }],
       activations: { [startHatKey]: 1 },
       steering: [],
+      iterationLogs: [],
     };
 
     // Capture newSession from command context for use in agent_end handler.
@@ -304,7 +306,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
   pi.registerCommand("ralph", {
     description: "Start a Ralph orchestration loop",
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["stop", "status", "steer", "presets"];
+      const subcommands = ["stop", "status", "steer", "history", "presets"];
       const presetNames = Object.keys(presets);
       const all = [...subcommands, ...presetNames];
       const filtered = all.filter((s) => s.startsWith(prefix));
@@ -356,6 +358,89 @@ export default function ralphExtension(pi: ExtensionAPI) {
           `Steering queued (${loopState.steering.length} pending). Will be injected into the next hat.`,
           "info",
         );
+        return;
+      }
+
+      if (trimmed === "history") {
+        if (!loopState) {
+          ctx.ui.notify("No loop state available", "info");
+          return;
+        }
+        const logs = loopState.iterationLogs;
+        if (logs.length === 0) {
+          ctx.ui.notify("No iteration history yet", "info");
+          return;
+        }
+
+        await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+          let currentIdx = logs.length - 1;
+          let scrollOffset = 0;
+
+          return {
+            render(width: number): string[] {
+              const log = logs[currentIdx];
+              const lines: string[] = [];
+              const rule = theme.fg("accent", "─".repeat(Math.min(width, 80)));
+
+              lines.push(rule);
+              lines.push(
+                theme.fg("accent", theme.bold(` Iteration ${log.iteration}`)) +
+                theme.fg("dim", ` (${currentIdx + 1}/${logs.length})`)
+              );
+              lines.push("");
+              lines.push(theme.fg("muted", "  Hat: ") + theme.fg("text", log.hatName));
+              lines.push(theme.fg("muted", "  Event: ") + theme.fg("text", log.event));
+              lines.push(
+                theme.fg("muted", "  Time: ") +
+                theme.fg("dim", new Date(log.timestamp).toLocaleTimeString())
+              );
+              lines.push("");
+
+              const summaryLines = log.summary.split("\n");
+              const maxVisible = 20;
+              const maxScroll = Math.max(0, summaryLines.length - maxVisible);
+              scrollOffset = Math.min(scrollOffset, maxScroll);
+
+              const visible = summaryLines.slice(scrollOffset, scrollOffset + maxVisible);
+              for (const line of visible) {
+                lines.push("  " + truncateToWidth(line, width - 4));
+              }
+
+              if (summaryLines.length > maxVisible) {
+                lines.push("");
+                lines.push(
+                  theme.fg("dim",
+                    `  [${scrollOffset + 1}-${Math.min(scrollOffset + maxVisible, summaryLines.length)}` +
+                    `/${summaryLines.length} lines]`
+                  )
+                );
+              }
+
+              lines.push("");
+              lines.push(rule);
+              lines.push(theme.fg("dim", "  \u2190/\u2192 iteration \u2022 \u2191/\u2193 scroll \u2022 esc close"));
+
+              return lines;
+            },
+            invalidate() {},
+            handleInput(data: string) {
+              if (matchesKey(data, Key.escape)) {
+                done();
+              } else if (matchesKey(data, Key.left) && currentIdx > 0) {
+                currentIdx--;
+                scrollOffset = 0;
+              } else if (matchesKey(data, Key.right) && currentIdx < logs.length - 1) {
+                currentIdx++;
+                scrollOffset = 0;
+              } else if (matchesKey(data, Key.up)) {
+                scrollOffset = Math.max(0, scrollOffset - 1);
+              } else if (matchesKey(data, Key.down)) {
+                scrollOffset++;
+              }
+              tui.requestRender();
+            },
+          };
+        });
         return;
       }
 
@@ -492,14 +577,29 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
     const output = getLastAssistantText(event.messages);
     const { preset } = loopState;
+    const currentHat = preset.hats[loopState.currentHatKey!];
+
+    // Helper to capture iteration summary before transitions
+    function captureIterationLog(eventName: string) {
+      loopState!.iterationLogs.push({
+        iteration: loopState!.iteration,
+        hatKey: loopState!.currentHatKey!,
+        hatName: currentHat.name,
+        event: eventName,
+        summary: output.slice(0, 2000),
+        timestamp: Date.now(),
+      });
+    }
 
     // Check completion promise (scans all assistant messages)
     if (containsCompletionPromiseInMessages(event.messages, preset.event_loop.completion_promise)) {
+      captureIterationLog(preset.event_loop.completion_promise);
       completeLoop(ctx);
       return;
     }
     // Also check legacy format in last message
     if (output.includes(preset.event_loop.completion_promise)) {
+      captureIterationLog(preset.event_loop.completion_promise);
       completeLoop(ctx);
       return;
     }
@@ -520,7 +620,6 @@ export default function ralphExtension(pi: ExtensionAPI) {
     }
 
     // Detect published event (scans all assistant messages, not just the last)
-    const currentHat = preset.hats[loopState.currentHatKey];
     const publishedEvent = detectPublishedEventFromMessages(event.messages, currentHat);
 
     if (!publishedEvent) {
@@ -548,6 +647,9 @@ export default function ralphExtension(pi: ExtensionAPI) {
         return;
       }
     }
+
+    // Capture iteration summary before transitioning
+    captureIterationLog(publishedEvent);
 
     // Advance loop
     loopState.currentHatKey = nextHatKey;
@@ -595,6 +697,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
         prompt: loopState.prompt,
         history: loopState.history,
         steering: loopState.steering,
+        iterationLogs: loopState.iterationLogs,
       });
     }
   }
@@ -630,6 +733,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
           active: true,
           history: d.history || [],
           steering: d.steering || [],
+          iterationLogs: d.iterationLogs || [],
         };
         loopTriggeredTurn = true;
       }

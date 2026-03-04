@@ -36,6 +36,15 @@ export interface PresetConfig {
   };
 }
 
+export interface IterationLog {
+  iteration: number;
+  hatKey: string;
+  hatName: string;
+  event: string;
+  summary: string;
+  timestamp: number;
+}
+
 export interface LoopState {
   presetName: string;
   preset: PresetConfig;
@@ -48,6 +57,7 @@ export interface LoopState {
   history: Array<{ hat: string; event: string; iteration: number }>;
   activations: Record<string, number>;
   steering: string[];
+  iterationLogs: IterationLog[];
 }
 
 // ── Preset Parsing ─────────────────────────────────────────────────────────

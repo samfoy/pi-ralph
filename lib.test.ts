@@ -61,6 +61,7 @@ function makeLoopState(overrides: Partial<LoopState> = {}): LoopState {
     history: [],
     activations: {},
     steering: [],
+    iterationLogs: [],
     ...overrides,
   };
 }
