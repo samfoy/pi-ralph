@@ -160,7 +160,8 @@ Write \`specs/{task_name}/design.md\` with:
 - Overview, Detailed Requirements, Architecture (with Mermaid diagrams)
 - Components/Interfaces, Data Models, Error Handling
 - Acceptance Criteria (Given-When-Then format)
-- Testing Strategy, Appendices
+- Testing Strategy (unit tests AND integration tests — deploy to dev account and verify end-to-end)
+- Appendices
 
 Gate: Wait for user approval of the design.
 
@@ -168,6 +169,7 @@ Gate: Wait for user approval of the design.
 Write \`specs/{task_name}/plan.md\` — numbered incremental steps.
 Each step: objective, implementation guidance, test requirements, demo description.
 Core end-to-end functionality should be available as early as possible.
+Include integration test steps: deploy to personal dev account and verify end-to-end behavior before each CR.
 
 Gate: Wait for user approval of the plan.
 

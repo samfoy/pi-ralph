@@ -28,7 +28,8 @@ hats:
       1. Analyze the task requirements
       2. Explore the codebase for relevant patterns and existing code
       3. Break the work into small, atomic tasks (each independently testable)
-      4. Write the task list to the scratchpad
+      4. Include integration test tasks at CR boundaries (deploy to dev account + verify end-to-end)
+      5. Write the task list to the scratchpad
 
       ### Scratchpad Format
       Write a task checklist to the scratchpad like:
@@ -99,6 +100,7 @@ hats:
       - [ ] **Standards:** Does it follow the project's AGENTS.md and code review guidelines?
       - [ ] **Correctness:** Does it match the task requirements?
       - [ ] **Tests:** Are there tests? Do they cover edge cases?
+      - [ ] **Integration:** If this is a CR boundary, has local deployment + integration testing been planned or completed?
       - [ ] **Patterns:** Does it follow existing codebase patterns?
       - [ ] **Errors:** Is error handling appropriate?
 
