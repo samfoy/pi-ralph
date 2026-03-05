@@ -24,6 +24,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 
 import type { PresetConfig, LoopState, LoopRecord } from "./lib.js";
 import {
@@ -794,6 +795,44 @@ export default function ralphExtension(pi: ExtensionAPI) {
       planModeActive = true;
       updateStatus(ctx);
       pi.sendUserMessage(`${idea}`);
+    },
+  });
+
+  // ── LLM-callable Tool ────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "start_ralph_loop",
+    label: "Start Ralph Loop",
+    description:
+      "Start a Ralph orchestration loop. Use this when a task would benefit from " +
+      "multi-step hat-based orchestration (planning, building, reviewing, committing). " +
+      "Available presets: feature (plan→build→review→commit), code-assist (TDD pipeline), " +
+      "spec-driven (spec-first development), refactor (safe refactoring), review (code review), " +
+      "debug (scientific debugging). The loop runs autonomously after starting.",
+    parameters: Type.Object({
+      preset: Type.String({ description: "Preset name: feature, code-assist, spec-driven, refactor, review, or debug" }),
+      prompt: Type.String({ description: "Task description for the loop" }),
+    }),
+    async execute(toolCallId, params) {
+      const presetName = params.preset.trim();
+      if (!presets[presetName]) {
+        const available = Object.keys(presets).join(", ");
+        return {
+          content: [{ type: "text", text: `Unknown preset "${presetName}". Available: ${available}` }],
+          details: {},
+        };
+      }
+      if (loopState?.active) {
+        return {
+          content: [{ type: "text", text: "A Ralph loop is already running. Stop it first with /ralph stop." }],
+          details: {},
+        };
+      }
+      pi.sendUserMessage(`/ralph ${presetName} ${params.prompt}`, { deliverAs: "followUp" });
+      return {
+        content: [{ type: "text", text: `Starting Ralph loop: ${presetName} — ${params.prompt}` }],
+        details: {},
+      };
     },
   });
 
