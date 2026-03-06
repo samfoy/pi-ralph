@@ -15,6 +15,7 @@ hats:
     description: "Reviews code for correctness, clarity, and maintainability."
     triggers: ["review.start", "analysis.complete"]
     publishes: ["review.section"]
+    default_publishes: "review.section"
     instructions: |
       ## CODE REVIEWER MODE
 

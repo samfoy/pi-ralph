@@ -189,8 +189,18 @@ export default function ralphExtension(pi: ExtensionAPI) {
   let planModeActive = false;
   // Track whether the last agent turn was triggered by the loop orchestrator
   let loopTriggeredTurn = false;
+  // When true, the next agent_end should kick off the first hat instead of detecting events
+  let pendingKickoff = false;
   // Store newSession from command context for use in event handlers
   let storedNewSession: (() => Promise<{ cancelled: boolean }>) | null = null;
+
+  /** Send a hat orchestration message via sendMessage (not sendUserMessage). */
+  function sendHatMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }) {
+    pi.sendMessage(
+      { customType: "ralph-hat", content, display: true },
+      { triggerTurn: true, deliverAs: options?.deliverAs ?? "followUp" },
+    );
+  }
 
   function updateStatus(ctx: ExtensionContext) {
     if (loopState?.active && loopState.currentHatKey) {
@@ -251,6 +261,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
     }
 
     loopState.active = false;
+    pendingKickoff = false;
     // Persist terminal state so session_start knows the loop completed
     pi.appendEntry("ralph-loop-state", {
       presetName: loopState.presetName,
@@ -338,7 +349,12 @@ export default function ralphExtension(pi: ExtensionAPI) {
     // Start a fresh session for the first hat
     const startNewSession = storedNewSession ?? (() => Promise.resolve({ cancelled: false }));
     startNewSession().then(() => {
-      pi.sendUserMessage(
+      // pendingKickoff is set AFTER newSession() because with a fresh session,
+      // the hat message IS the first real turn — there's no command/tool response
+      // turn to skip. Setting it before newSession() would cause agent_end to
+      // skip event detection on the only turn in the session.
+      pendingKickoff = false;
+      sendHatMessage(
         `[Ralph Loop: ${presetName}] Starting with hat: ${hatName}\n\nTask: ${prompt}`,
       );
     });
@@ -813,7 +829,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
       preset: Type.String({ description: "Preset name: feature, code-assist, spec-driven, refactor, review, or debug" }),
       prompt: Type.String({ description: "Task description for the loop" }),
     }),
-    async execute(toolCallId, params) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const presetName = params.preset.trim();
       if (!presets[presetName]) {
         const available = Object.keys(presets).join(", ");
@@ -828,7 +844,61 @@ export default function ralphExtension(pi: ExtensionAPI) {
           details: {},
         };
       }
-      pi.sendUserMessage(`/ralph ${presetName} ${params.prompt}`, { deliverAs: "followUp" });
+
+      // Set up loop state directly. Tools only get ExtensionContext (no newSession),
+      // so the loop shares the current session. This is fine — the agent_end handler
+      // treats user messages during the loop as steering and re-arms for the next
+      // loop-triggered turn.
+      const preset = presets[presetName];
+      const startEvent = preset.event_loop.starting_event;
+      let startHatKey: string | null = startEvent ? findHatForEvent(startEvent, preset) : null;
+      if (!startHatKey) startHatKey = Object.keys(preset.hats)[0] || null;
+      if (!startHatKey) {
+        return {
+          content: [{ type: "text", text: "Preset has no hats defined" }],
+          details: {},
+        };
+      }
+
+      loopState = {
+        presetName,
+        preset,
+        currentHatKey: startHatKey,
+        iteration: 1,
+        startTime: Date.now(),
+        prompt: params.prompt,
+        active: true,
+        paused: false,
+        cwd: ctx.cwd,
+        history: [{ hat: startHatKey, event: startEvent || "start", iteration: 1 }],
+        activations: { [startHatKey]: 1 },
+        steering: [],
+        iterationLogs: [],
+      };
+
+      // Create .ralph/ directory and scratchpad
+      const ralphDir = `${ctx.cwd}/.ralph`;
+      if (!existsSync(ralphDir)) mkdirSync(ralphDir, { recursive: true });
+      writeFileSync(
+        `${ralphDir}/scratchpad.md`,
+        `# Ralph Scratchpad\n\nPreset: ${presetName}\nTask: ${params.prompt}\n\n---\n\n`,
+      );
+
+      updateStatus(ctx);
+      loopTriggeredTurn = true;
+      // Do NOT set pendingKickoff — the hat message (followUp) IS the first real
+      // hat turn. Setting pendingKickoff would cause agent_end to skip event
+      // detection on that turn.
+
+      const hatName = preset.hats[startHatKey].name;
+
+      // Send first hat message as a followUp — it fires after the current agent
+      // turn finishes (i.e., after the tool result is processed).
+      sendHatMessage(
+        `[Ralph Loop: ${presetName}] Starting with hat: ${hatName}\n\nTask: ${params.prompt}`,
+        { deliverAs: "followUp" },
+      );
+
       return {
         content: [{ type: "text", text: `Starting Ralph loop: ${presetName} — ${params.prompt}` }],
         details: {},
@@ -890,6 +960,13 @@ export default function ralphExtension(pi: ExtensionAPI) {
     // Check if loop is paused (after handling user messages)
     if (loopState.paused) {
       // Don't auto-continue. User can resume with /ralph resume or by sending a message.
+      return;
+    }
+
+    // If the loop was just started (from tool or command), the current turn's output
+    // is not a hat response — skip event detection and let the queued hat message run.
+    if (pendingKickoff) {
+      pendingKickoff = false;
       return;
     }
 
@@ -995,7 +1072,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
     // Fresh session per hat — context passes through the scratchpad file on disk.
     const newSessionFn = storedNewSession ?? (() => Promise.resolve({ cancelled: false }));
     newSessionFn().then(() => {
-      pi.sendUserMessage(
+      sendHatMessage(
         `[Ralph Loop — Iteration ${loopState!.iteration}/${preset.event_loop.max_iterations}]\n` +
           `Event: ${publishedEvent} → Hat: ${nextHat.name}\n\n` +
           `Task: ${loopState!.prompt}\n\n` +

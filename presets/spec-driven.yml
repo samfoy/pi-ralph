@@ -125,6 +125,7 @@ hats:
     description: "Commits the current task. Routes back to implementer if more tasks remain."
     triggers: ["verification.passed"]
     publishes: ["tasks.next"]
+    default_publishes: "tasks.next"
     instructions: |
       ## COMMITTER MODE
 

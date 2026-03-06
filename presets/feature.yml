@@ -124,6 +124,7 @@ hats:
     description: "Commits the current task. Routes back to builder if more tasks remain."
     triggers: ["review.approved"]
     publishes: ["tasks.ready"]
+    default_publishes: "tasks.ready"
     instructions: |
       ## COMMITTER MODE
 

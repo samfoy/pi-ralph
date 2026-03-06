@@ -6,8 +6,8 @@
 event_loop:
   starting_event: "refactor.task"
   completion_promise: "REFACTOR_COMPLETE"
-  max_iterations: 50
-  max_runtime_seconds: 10800
+  max_iterations: 200
+  max_runtime_seconds: 100800
 
 hats:
   refactorer:
@@ -15,6 +15,7 @@ hats:
     description: "Executes one atomic refactoring step safely."
     triggers: ["refactor.task", "verify.failed", "verify.passed"]
     publishes: ["refactor.done"]
+    default_publishes: "refactor.done"
     instructions: |
       ## REFACTORER MODE
 

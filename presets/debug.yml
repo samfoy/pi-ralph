@@ -15,6 +15,7 @@ hats:
     description: "Finds root cause through systematic investigation."
     triggers: ["debug.start", "hypothesis.rejected", "hypothesis.confirmed", "fix.verified"]
     publishes: ["hypothesis.test", "fix.propose"]
+    default_publishes: "hypothesis.test"
     instructions: |
       ## INVESTIGATOR MODE
 

@@ -1,2 +1,4 @@
 node_modules/
 .ralph/
+test.py
+__pycache__/
