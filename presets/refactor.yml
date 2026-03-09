@@ -1,5 +1,6 @@
 # Refactoring Preset
 # Safe refactoring with verification at each step.
+# Refactorer → Verifier → Committer loop with task tracking.
 #
 # Usage: /ralph refactor Extract auth logic into a separate module
 
@@ -13,7 +14,7 @@ hats:
   refactorer:
     name: "🔄 Refactorer"
     description: "Executes one atomic refactoring step safely."
-    triggers: ["refactor.task", "verify.failed", "verify.passed"]
+    triggers: ["refactor.task", "verify.failed"]
     publishes: ["refactor.done"]
     default_publishes: "refactor.done"
     instructions: |
@@ -28,10 +29,7 @@ hats:
       3. **PLAN** — Outline the single atomic change
       4. **IMPLEMENT** — Make the change
       5. **VERIFY** — Run tests immediately after
-
-      ### If Triggered by verify.passed
-      The previous step succeeded. Continue with the next refactoring step.
-      If ALL refactoring is complete, output REFACTOR_COMPLETE on its own line.
+      6. **UPDATE SCRATCHPAD** — Add notes about what you did
 
       ### If Triggered by verify.failed
       Fix the issues identified by the verifier.
@@ -66,5 +64,36 @@ hats:
       Publish verify.failed if something broke — be specific about what's wrong.
 
       ### DON'T
-      - ❌ Output the completion promise — only the refactorer decides when done
+      - ❌ Output the completion promise — only the committer decides when done
       - ❌ Skip running tests yourself
+
+  committer:
+    name: "📦 Committer"
+    description: "Commits the current step. Routes back to refactorer if more work remains."
+    triggers: ["verify.passed"]
+    publishes: ["refactor.task"]
+    default_publishes: "refactor.task"
+    instructions: |
+      ## COMMITTER MODE
+
+      Commit the current refactoring step, then check if more work remains.
+
+      ### Process
+      1. Read the scratchpad to understand what was just refactored
+      2. Run `git status` and `git diff` to review changes
+      3. Stage relevant files with `git add`
+      4. Create commit with conventional format:
+         ```
+         refactor(<scope>): <description>
+         ```
+      5. **CHECK THE SCRATCHPAD** — is the overall refactoring task complete?
+
+      ### Decision
+      - If there is MORE refactoring to do: publish `refactor.task`
+        (this sends the loop back to the Refactorer for the next step)
+      - If ALL refactoring is complete: output `REFACTOR_COMPLETE` on its own line
+
+      ### DON'T
+      - ❌ Commit if tests don't pass
+      - ❌ Push to remote
+      - ❌ Output REFACTOR_COMPLETE if the refactoring goal isn't fully met

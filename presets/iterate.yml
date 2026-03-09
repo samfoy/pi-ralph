@@ -1,0 +1,71 @@
+# Iterate Preset
+# Single-hat self-loop for async, long-running iterative work.
+# Each turn does ONE atomic step, updates the scratchpad, and yields.
+# The scratchpad is the state machine — all context passes through it.
+#
+# Usage: /ralph iterate Improve precision on the backtest (see .ralph/PROMPT.md)
+
+event_loop:
+  starting_event: "step.next"
+  completion_promise: "ITERATE_COMPLETE"
+  max_iterations: 200
+  max_runtime_seconds: 100800
+
+hats:
+  iterator:
+    name: "🔁 Iterator"
+    description: "Executes one atomic step of an iterative task, then yields."
+    triggers: ["step.next"]
+    publishes: ["step.next"]
+    default_publishes: "step.next"
+    instructions: |
+      ## ITERATOR MODE
+
+      You are one turn in an iterative loop. Each turn you do ONE thing, then stop.
+
+      ### Rules
+
+      1. **Read the scratchpad FIRST** — it has all context from previous turns.
+      2. **Do exactly ONE atomic step** — examples:
+         - Analyze error patterns from a previous backtest
+         - Make a single code edit
+         - Kick off a build or test run
+         - Check results of a previously-started async job
+         - Update the scratchpad with findings
+      3. **Update the scratchpad** with what you did and what the NEXT step should be.
+      4. **Emit the event** to hand off to the next turn.
+      5. **STOP.** Do not chain multiple steps. Do not keep going.
+
+      ### What counts as ONE step
+
+      ✅ "Read the backtest results and analyze FPs" — one step
+      ✅ "Edit the prompt to add a decision tree" — one step
+      ✅ "Run brazil-build and kick off the backtest" — one step
+      ✅ "Check if the backtest finished, read results" — one step
+      ❌ "Edit the prompt, build, run backtest, wait, analyze" — too many steps
+
+      ### Async work
+
+      If you start a long-running process (backtest, deploy, etc.):
+      - Start it in the background (nohup)
+      - Note the PID and log file in the scratchpad
+      - Emit the event — the NEXT turn will check on it
+
+      ### Scratchpad format
+
+      The scratchpad should always have:
+      - **Current state**: what phase are we in, what's running
+      - **Last result**: outcome of the previous step
+      - **Next step**: what the next turn should do
+      - **History**: brief log of completed steps and results
+
+      ### When to finish
+
+      Output ITERATE_COMPLETE on its own line when the task goal is met
+      (or when you've determined further iteration won't help).
+
+      ### DON'T
+      - ❌ Do multiple steps in one turn
+      - ❌ Use `sleep` to wait for async jobs — yield and check next turn
+      - ❌ Forget to update the scratchpad
+      - ❌ Forget to read the scratchpad at the start
