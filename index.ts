@@ -36,6 +36,7 @@ import {
   containsCompletionPromise,
   findHatForEvent,
   buildHatInjection,
+  detectStaleCycle,
 } from "./lib.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -90,6 +91,11 @@ function loadAllPresets(cwd: string): Record<string, PresetConfig> {
 
 /**
  * Search ALL assistant messages for a published event, not just the last one.
+ * Only falls back to default_publishes after checking every message for an
+ * explicit event tag — this prevents a later message without an event from
+ * shadowing an earlier message that has one (e.g., reviewer emitting
+ * review.changes_requested in a tool-call turn, then a follow-up turn with
+ * no event tag incorrectly defaulting to review.approved).
  */
 function detectPublishedEventFromMessages(messages: AgentMessage[], hat: import("./lib.js").HatConfig): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -99,7 +105,8 @@ function detectPublishedEventFromMessages(messages: AgentMessage[], hat: import(
       if (event) return event;
     }
   }
-  return null;
+  // No explicit event found in any message — fall back to default_publishes
+  return hat.default_publishes || null;
 }
 
 /**
@@ -1041,6 +1048,18 @@ export default function ralphExtension(pi: ExtensionAPI) {
         stopLoop(ctx, `Hat "${nextHatConfig.name}" exhausted (${nextHatConfig.max_activations} activations)`);
         return;
       }
+    }
+
+    // Check for stale cycles — same hat:event sequence repeating without progress.
+    // Build tentative history including the next transition to detect the repeat.
+    const tentativeHistory = [
+      ...loopState.history,
+      { hat: nextHatKey, event: publishedEvent, iteration: loopState.iteration + 1 },
+    ];
+    if (detectStaleCycle(tentativeHistory)) {
+      captureIterationLog(publishedEvent);
+      completeLoop(ctx);
+      return;
     }
 
     // Capture iteration summary before transitioning

@@ -10,6 +10,7 @@ import {
   containsCompletionPromise,
   findHatForEvent,
   buildHatInjection,
+  detectStaleCycle,
   type HatConfig,
   type PresetConfig,
   type LoopState,
@@ -176,15 +177,28 @@ describe("detectPublishedEvent", () => {
     expect(detectPublishedEvent(text, hat)).toBe("done");
   });
 
-  it("falls back to default_publishes when no event found", () => {
+  it("returns null when no event found (callers handle default fallback)", () => {
     const text = "I did some work but forgot to publish an event.";
-    expect(detectPublishedEvent(text, hat)).toBe("done");
+    expect(detectPublishedEvent(text, hat)).toBeNull();
   });
 
   it("returns null when no event and no default", () => {
     const noDefaultHat = makeHat({ default_publishes: undefined });
     const text = "No event here.";
     expect(detectPublishedEvent(text, noDefaultHat)).toBeNull();
+  });
+
+  it("returns null even with default_publishes when no event pattern found", () => {
+    // This is the key behavioral change: detectPublishedEvent no longer
+    // auto-returns default_publishes when no explicit event is in the text.
+    // The caller (detectPublishedEventFromMessages) applies the default
+    // only after checking ALL messages.
+    const text = "I reviewed the code and found issues. The builder should fix them.";
+    const reviewerHat = makeHat({
+      publishes: ["review.approved", "review.changes_requested"],
+      default_publishes: "review.approved",
+    });
+    expect(detectPublishedEvent(text, reviewerHat)).toBeNull();
   });
 
   it("prefers XML over legacy when both present", () => {
@@ -226,6 +240,26 @@ describe("containsCompletionPromise", () => {
     expect(containsCompletionPromise([], "LOOP_COMPLETE")).toBe(false);
   });
 
+  it("detects promise wrapped in markdown bold", () => {
+    expect(containsCompletionPromise(["**LOOP_COMPLETE**"], "LOOP_COMPLETE")).toBe(true);
+  });
+
+  it("detects promise wrapped in markdown italic", () => {
+    expect(containsCompletionPromise(["*LOOP_COMPLETE*"], "LOOP_COMPLETE")).toBe(true);
+  });
+
+  it("detects promise wrapped in markdown code", () => {
+    expect(containsCompletionPromise(["`LOOP_COMPLETE`"], "LOOP_COMPLETE")).toBe(true);
+  });
+
+  it("detects promise wrapped in markdown heading", () => {
+    expect(containsCompletionPromise(["## LOOP_COMPLETE"], "LOOP_COMPLETE")).toBe(true);
+  });
+
+  it("detects promise with mixed markdown formatting", () => {
+    expect(containsCompletionPromise(["**`LOOP_COMPLETE`**"], "LOOP_COMPLETE")).toBe(true);
+  });
+
   it("checks only the last non-empty line per text block", () => {
     // Promise is NOT the last non-empty line
     const text = "LOOP_COMPLETE\nBut I kept going after that.";
@@ -241,6 +275,148 @@ describe("containsCompletionPromise", () => {
   it("works with custom promise strings", () => {
     expect(containsCompletionPromise(["DEBUG_COMPLETE"], "DEBUG_COMPLETE")).toBe(true);
     expect(containsCompletionPromise(["REFACTOR_COMPLETE"], "REFACTOR_COMPLETE")).toBe(true);
+  });
+});
+
+// ── detectStaleCycle ────────────────────────────────────────────────────────
+
+describe("detectStaleCycle", () => {
+  it("returns false for short history", () => {
+    const history = [
+      { hat: "builder", event: "tasks.ready", iteration: 1 },
+      { hat: "reviewer", event: "build.done", iteration: 2 },
+    ];
+    expect(detectStaleCycle(history)).toBe(false);
+  });
+
+  it("returns false for only 2 identical cycles (normal multi-task work)", () => {
+    const history = [
+      { hat: "builder", event: "tasks.ready", iteration: 1 },
+      { hat: "reviewer", event: "build.done", iteration: 2 },
+      { hat: "committer", event: "review.approved", iteration: 3 },
+      { hat: "builder", event: "tasks.ready", iteration: 4 },
+      { hat: "reviewer", event: "build.done", iteration: 5 },
+      { hat: "committer", event: "review.approved", iteration: 6 },
+    ];
+    expect(detectStaleCycle(history)).toBe(false);
+  });
+
+  it("detects 3 repeating 3-hat cycles", () => {
+    const history = [
+      { hat: "builder", event: "tasks.ready", iteration: 1 },
+      { hat: "reviewer", event: "build.done", iteration: 2 },
+      { hat: "committer", event: "review.approved", iteration: 3 },
+      { hat: "builder", event: "tasks.ready", iteration: 4 },
+      { hat: "reviewer", event: "build.done", iteration: 5 },
+      { hat: "committer", event: "review.approved", iteration: 6 },
+      { hat: "builder", event: "tasks.ready", iteration: 7 },
+      { hat: "reviewer", event: "build.done", iteration: 8 },
+      { hat: "committer", event: "review.approved", iteration: 9 },
+    ];
+    expect(detectStaleCycle(history)).toBe(true);
+  });
+
+  it("returns false when cycles differ", () => {
+    const history = [
+      { hat: "builder", event: "tasks.ready", iteration: 1 },
+      { hat: "reviewer", event: "build.done", iteration: 2 },
+      { hat: "committer", event: "review.approved", iteration: 3 },
+      { hat: "builder", event: "tasks.ready", iteration: 4 },
+      { hat: "reviewer", event: "build.done", iteration: 5 },
+      { hat: "builder", event: "review.changes_requested", iteration: 6 },
+      { hat: "builder", event: "tasks.ready", iteration: 7 },
+      { hat: "reviewer", event: "build.done", iteration: 8 },
+      { hat: "committer", event: "review.approved", iteration: 9 },
+    ];
+    expect(detectStaleCycle(history)).toBe(false);
+  });
+
+  it("detects 3 repeating 2-hat cycles", () => {
+    const history = [
+      { hat: "refactorer", event: "refactor.start", iteration: 1 },
+      { hat: "verifier", event: "refactor.done", iteration: 2 },
+      { hat: "refactorer", event: "refactor.start", iteration: 3 },
+      { hat: "verifier", event: "refactor.done", iteration: 4 },
+      { hat: "refactorer", event: "refactor.start", iteration: 5 },
+      { hat: "verifier", event: "refactor.done", iteration: 6 },
+    ];
+    expect(detectStaleCycle(history)).toBe(true);
+  });
+
+  it("ignores earlier non-repeating history", () => {
+    // Planner breaks the pattern early, but last 9 entries form 3 identical cycles
+    const history = [
+      { hat: "planner", event: "plan.start", iteration: 1 },
+      { hat: "builder", event: "tasks.ready", iteration: 2 },
+      { hat: "reviewer", event: "build.done", iteration: 3 },
+      { hat: "committer", event: "review.approved", iteration: 4 },
+      { hat: "builder", event: "tasks.ready", iteration: 5 },
+      { hat: "reviewer", event: "build.done", iteration: 6 },
+      { hat: "committer", event: "review.approved", iteration: 7 },
+      { hat: "builder", event: "tasks.ready", iteration: 8 },
+      { hat: "reviewer", event: "build.done", iteration: 9 },
+      { hat: "committer", event: "review.approved", iteration: 10 },
+    ];
+    expect(detectStaleCycle(history)).toBe(true);
+  });
+
+  it("reproduces the zombie loop from the bug report", () => {
+    const history = [
+      { hat: "planner", event: "plan.start", iteration: 1 },
+      { hat: "builder", event: "tasks.ready", iteration: 2 },
+      { hat: "reviewer", event: "build.done", iteration: 3 },
+      { hat: "committer", event: "review.approved", iteration: 4 },
+      { hat: "builder", event: "tasks.ready", iteration: 5 },
+      { hat: "reviewer", event: "build.done", iteration: 6 },
+      { hat: "committer", event: "review.approved", iteration: 7 },
+      { hat: "builder", event: "tasks.ready", iteration: 8 },
+      { hat: "reviewer", event: "build.done", iteration: 9 },
+      { hat: "committer", event: "review.approved", iteration: 10 },
+      { hat: "builder", event: "tasks.ready", iteration: 11 },
+      { hat: "reviewer", event: "build.done", iteration: 12 },
+      { hat: "committer", event: "review.approved", iteration: 13 },
+      // Zombie iterations — committer said RALPH:DONE but default_publishes
+      // sent it back to builder
+      { hat: "builder", event: "tasks.ready", iteration: 14 },
+      { hat: "reviewer", event: "build.done", iteration: 15 },
+      { hat: "committer", event: "review.approved", iteration: 16 },
+      { hat: "builder", event: "tasks.ready", iteration: 17 },
+      { hat: "reviewer", event: "build.done", iteration: 18 },
+      { hat: "committer", event: "review.approved", iteration: 19 },
+    ];
+    // Tentative next entry — would have been caught here
+    const tentative = [
+      ...history,
+      { hat: "builder", event: "tasks.ready", iteration: 20 },
+    ];
+    expect(detectStaleCycle(tentative)).toBe(true);
+  });
+
+  it("does not false-positive on two productive cycles after planner", () => {
+    const history = [
+      { hat: "planner", event: "plan.start", iteration: 1 },
+      { hat: "builder", event: "tasks.ready", iteration: 2 },
+      { hat: "reviewer", event: "build.done", iteration: 3 },
+      { hat: "committer", event: "review.approved", iteration: 4 },
+      { hat: "builder", event: "tasks.ready", iteration: 5 },
+      { hat: "reviewer", event: "build.done", iteration: 6 },
+      { hat: "committer", event: "review.approved", iteration: 7 },
+    ];
+    expect(detectStaleCycle(history)).toBe(false);
+  });
+
+  it("does not false-positive on first productive cycle after planner", () => {
+    const history = [
+      { hat: "planner", event: "plan.start", iteration: 1 },
+      { hat: "builder", event: "tasks.ready", iteration: 2 },
+      { hat: "reviewer", event: "build.done", iteration: 3 },
+      { hat: "committer", event: "review.approved", iteration: 4 },
+    ];
+    const tentative = [
+      ...history,
+      { hat: "builder", event: "tasks.ready", iteration: 5 },
+    ];
+    expect(detectStaleCycle(tentative)).toBe(false);
   });
 });
 

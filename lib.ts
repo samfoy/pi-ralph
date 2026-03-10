@@ -191,6 +191,7 @@ export function detectPublishedEvent(text: string, hat: HatConfig): string | nul
     const lastMatch = xmlMatches[xmlMatches.length - 1];
     const topic = lastMatch[1];
     if (hat.publishes.includes(topic)) return topic;
+    // Explicit event found but topic unrecognized — fall back to default
     return hat.default_publishes || null;
   }
 
@@ -199,11 +200,13 @@ export function detectPublishedEvent(text: string, hat: HatConfig): string | nul
   if (match) {
     const eventName = match[1].replace(/\s*<<<?\s*$/, "");
     if (hat.publishes.includes(eventName)) return eventName;
+    // Explicit event found but name unrecognized — fall back to default
     return hat.default_publishes || null;
   }
 
-  // 3. Fall back to default_publishes
-  return hat.default_publishes || null;
+  // 3. No event pattern found in this text — return null so callers can
+  //    check other messages before falling back to default_publishes.
+  return null;
 }
 
 export function containsCompletionPromise(texts: string[], promise: string): boolean {
@@ -216,9 +219,53 @@ export function containsCompletionPromise(texts: string[], promise: string): boo
       if (!trimmed) continue;
       if (trimmed === promise) return true;
       if (trimmed === `>>> ${promise}`) return true;
+      // Strip leading/trailing markdown formatting (bold, italic, code, heading) and re-check
+      const bare = trimmed.replace(/^[*_`#\s]+|[*_`#\s]+$/g, "");
+      if (bare === promise) return true;
+      if (bare === `>>> ${promise}`) return true;
       break; // Only check the last non-empty line per text block
     }
   }
+  return false;
+}
+
+// ── Stale Cycle Detection ──────────────────────────────────────────────────
+
+/**
+ * Detect when the loop is stuck in a repeating hat cycle with no progress.
+ *
+ * Tries all possible cycle lengths (2 up to a third of the history) and checks
+ * whether the last THREE full cycles are identical hat:event sequences.
+ * Requiring 3 repeats avoids false positives on normal multi-task work where
+ * the same builder→reviewer→committer cycle runs for each task.
+ */
+export function detectStaleCycle(
+  history: Array<{ hat: string; event: string; iteration: number }>,
+): boolean {
+  if (history.length < 6) return false;
+
+  const keys = history.map((h) => `${h.hat}:${h.event}`);
+  const minRepeats = 3;
+  const maxCycleLen = Math.floor(keys.length / minRepeats);
+
+  for (let cycleLen = 2; cycleLen <= maxCycleLen; cycleLen++) {
+    const cycle = keys.slice(-cycleLen);
+    let repeats = 1;
+
+    for (let r = 2; r <= minRepeats; r++) {
+      const start = keys.length - r * cycleLen;
+      if (start < 0) break;
+      const prev = keys.slice(start, start + cycleLen);
+      if (prev.every((k, i) => k === cycle[i])) {
+        repeats++;
+      } else {
+        break;
+      }
+    }
+
+    if (repeats >= minRepeats) return true;
+  }
+
   return false;
 }
 
