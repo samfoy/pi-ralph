@@ -25,10 +25,10 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import { matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import type { Theme } from "@mariozechner/pi-coding-agent";
 
-import type { PresetConfig, LoopState, LoopRecord } from "./lib.js";
+import type { PresetConfig, LoopState, LoopRecord, HatConfig } from "./lib.js";
 import {
-  parsePreset,
   loadPresetsFromDir,
   loadLoopRecords,
   saveLoopRecord,
@@ -36,7 +36,8 @@ import {
   containsCompletionPromise,
   findHatForEvent,
   buildHatInjection,
-  detectStaleCycle,
+  inferEventFromContent,
+  determineNextAction,
 } from "./lib.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ function loadAllPresets(cwd: string): Record<string, PresetConfig> {
  * review.changes_requested in a tool-call turn, then a follow-up turn with
  * no event tag incorrectly defaulting to review.approved).
  */
-function detectPublishedEventFromMessages(messages: AgentMessage[], hat: import("./lib.js").HatConfig): string | null {
+function detectPublishedEventFromMessages(messages: AgentMessage[], hat: HatConfig): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (isAssistantMessage(messages[i])) {
       const text = getAssistantText(messages[i] as AssistantMessage);
@@ -105,7 +106,16 @@ function detectPublishedEventFromMessages(messages: AgentMessage[], hat: import(
       if (event) return event;
     }
   }
-  // No explicit event found in any message — fall back to default_publishes
+  // No explicit event found in any message — try content-based inference
+  // before falling back to default_publishes (safety net for multi-event hats)
+  const allText = messages
+    .filter(isAssistantMessage)
+    .map((m) => getAssistantText(m as AssistantMessage))
+    .join("\n");
+  const inferred = inferEventFromContent(allText, hat);
+  if (inferred) return inferred;
+
+  // Last resort: fall back to default_publishes
   return hat.default_publishes || null;
 }
 
@@ -190,14 +200,26 @@ Ask if the user wants a PROMPT.md for autonomous implementation via:
 
 // ── Extension ──────────────────────────────────────────────────────────────
 
+/** Render content lines inside a Unicode box with a title. */
+function bordered(content: string[], width: number, title: string, theme: Theme): string[] {
+  const inner = width - 2; // space inside the border chars
+  const titleText = ` ${title} `;
+  const topFill = Math.max(0, inner - titleText.length - 1);
+  const out: string[] = [];
+  out.push(theme.fg("border", "╭─") + theme.fg("accent", theme.bold(titleText)) + theme.fg("border", "─".repeat(topFill) + "╮"));
+  for (const line of content) {
+    const truncated = truncateToWidth(line, inner - 2);
+    const pad = Math.max(0, inner - 2 - visibleWidth(truncated));
+    out.push(theme.fg("border", "│") + " " + truncated + " ".repeat(pad) + " " + theme.fg("border", "│"));
+  }
+  out.push(theme.fg("border", "╰" + "─".repeat(inner) + "╯"));
+  return out;
+}
+
 export default function ralphExtension(pi: ExtensionAPI) {
   let presets: Record<string, PresetConfig> = {};
   let loopState: LoopState | null = null;
   let planModeActive = false;
-  // Track whether the last agent turn was triggered by the loop orchestrator
-  let loopTriggeredTurn = false;
-  // When true, the next agent_end should kick off the first hat instead of detecting events
-  let pendingKickoff = false;
   // Store newSession from command context for use in event handlers
   let storedNewSession: (() => Promise<{ cancelled: boolean }>) | null = null;
 
@@ -268,7 +290,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
     }
 
     loopState.active = false;
-    pendingKickoff = false;
+    loopState.pendingKickoff = false;
     // Persist terminal state so session_start knows the loop completed
     pi.appendEntry("ralph-loop-state", {
       presetName: loopState.presetName,
@@ -282,9 +304,10 @@ export default function ralphExtension(pi: ExtensionAPI) {
       iterationLogs: loopState.iterationLogs,
       active: false,
       paused: loopState.paused,
+      loopTriggeredTurn: loopState.loopTriggeredTurn,
+      pendingKickoff: loopState.pendingKickoff,
     });
     loopState = null;
-    loopTriggeredTurn = false;
     updateStatus(ctx);
     ctx.ui.notify(`Ralph loop ended: ${reason} (${iterations} iterations, ${elapsed}s)`, "info");
   }
@@ -331,13 +354,15 @@ export default function ralphExtension(pi: ExtensionAPI) {
       activations: { [startHatKey]: 1 },
       steering: [],
       iterationLogs: [],
+      loopTriggeredTurn: true,
+      pendingKickoff: false,
     };
 
     // Capture newSession from command context for use in agent_end handler.
     // newSession is only available on ExtensionCommandContext (command handlers),
     // not on the base ExtensionContext (event handlers like agent_end).
-    if ('newSession' in ctx) {
-      storedNewSession = (ctx as any).newSession.bind(ctx);
+    if ('newSession' in ctx && typeof (ctx as ExtensionContext & { newSession?: () => Promise<{ cancelled: boolean }> }).newSession === 'function') {
+      storedNewSession = (ctx as ExtensionContext & { newSession: () => Promise<{ cancelled: boolean }> }).newSession.bind(ctx);
     }
 
     // Create .ralph/ directory for scratchpad
@@ -349,18 +374,17 @@ export default function ralphExtension(pi: ExtensionAPI) {
     writeFileSync(`${ralphDir}/scratchpad.md`, `# Ralph Scratchpad\n\nPreset: ${presetName}\nTask: ${prompt}\n\n---\n\n`);
 
     updateStatus(ctx);
-    loopTriggeredTurn = true;
 
     const hatName = preset.hats[startHatKey].name;
 
     // Start a fresh session for the first hat
     const startNewSession = storedNewSession ?? (() => Promise.resolve({ cancelled: false }));
-    startNewSession().then(() => {
+    void startNewSession().then(() => {
       // pendingKickoff is set AFTER newSession() because with a fresh session,
       // the hat message IS the first real turn — there's no command/tool response
       // turn to skip. Setting it before newSession() would cause agent_end to
       // skip event detection on the only turn in the session.
-      pendingKickoff = false;
+      loopState!.pendingKickoff = false;
       sendHatMessage(
         `[Ralph Loop: ${presetName}] Starting with hat: ${hatName}\n\nTask: ${prompt}`,
       );
@@ -461,21 +485,6 @@ export default function ralphExtension(pi: ExtensionAPI) {
         return;
       }
 
-      function bordered(content: string[], width: number, title: string, theme: any): string[] {
-        const inner = width - 2; // space inside the border chars
-        const titleText = ` ${title} `;
-        const topFill = Math.max(0, inner - titleText.length - 1);
-        const out: string[] = [];
-        out.push(theme.fg("border", "╭─") + theme.fg("accent", theme.bold(titleText)) + theme.fg("border", "─".repeat(topFill) + "╮"));
-        for (const line of content) {
-          const truncated = truncateToWidth(line, inner - 2);
-          const pad = Math.max(0, inner - 2 - visibleWidth(truncated));
-          out.push(theme.fg("border", "│") + " " + truncated + " ".repeat(pad) + " " + theme.fg("border", "│"));
-        }
-        out.push(theme.fg("border", "╰" + "─".repeat(inner) + "╯"));
-        return out;
-      }
-
       if (trimmed === "history") {
         if (!loopState) {
           ctx.ui.notify("No loop state available", "info");
@@ -487,7 +496,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
           return;
         }
 
-        await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+        await ctx.ui.custom<undefined>((tui, theme, _kb, done) => {
           let currentIdx = logs.length - 1;
           let scrollOffset = 0;
 
@@ -538,7 +547,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
             invalidate() {},
             handleInput(data: string) {
               if (matchesKey(data, Key.escape)) {
-                done();
+                done(undefined);
               } else if (matchesKey(data, Key.left) && currentIdx > 0) {
                 currentIdx--;
                 scrollOffset = 0;
@@ -572,7 +581,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
           return;
         }
 
-        await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+        await ctx.ui.custom<undefined>((tui, theme, _kb, done) => {
           let selectedIdx = 0;
           let listScrollOffset = 0;
           let detailMode = false;
@@ -692,7 +701,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
                   logIdx = 0;
                   logScrollOffset = 0;
                 } else {
-                  done();
+                  done(undefined);
                 }
               } else if (!detailMode) {
                 if (matchesKey(data, Key.up) && selectedIdx > 0) {
@@ -817,7 +826,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
       planModeActive = true;
       updateStatus(ctx);
-      pi.sendUserMessage(`${idea}`);
+      pi.sendUserMessage(idea);
     },
   });
 
@@ -836,7 +845,7 @@ export default function ralphExtension(pi: ExtensionAPI) {
       preset: Type.String({ description: "Preset name: feature, code-assist, spec-driven, refactor, review, or debug" }),
       prompt: Type.String({ description: "Task description for the loop" }),
     }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params: { preset: string; prompt: string }, _signal, _onUpdate, ctx) {
       const presetName = params.preset.trim();
       if (!presets[presetName]) {
         const available = Object.keys(presets).join(", ");
@@ -881,6 +890,8 @@ export default function ralphExtension(pi: ExtensionAPI) {
         activations: { [startHatKey]: 1 },
         steering: [],
         iterationLogs: [],
+        loopTriggeredTurn: true,
+        pendingKickoff: false,
       };
 
       // Create .ralph/ directory and scratchpad
@@ -892,7 +903,6 @@ export default function ralphExtension(pi: ExtensionAPI) {
       );
 
       updateStatus(ctx);
-      loopTriggeredTurn = true;
       // Do NOT set pendingKickoff — the hat message (followUp) IS the first real
       // hat turn. Setting pendingKickoff would cause agent_end to skip event
       // detection on that turn.
@@ -949,37 +959,9 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
     if (!loopState?.active || !loopState.currentHatKey) return;
 
-    // Only auto-continue if this turn was triggered by the loop
-    if (!loopTriggeredTurn) {
-      // User sent a manual message during the loop — treat as steering.
-      // If the loop was paused, auto-resume it.
-      if (loopState.paused) {
-        loopState.paused = false;
-        updateStatus(ctx);
-        persistState();
-        ctx.ui.notify("▶ Loop auto-resumed after user message", "info");
-      }
-      // Next agent_end after a loop-triggered turn will continue.
-      loopTriggeredTurn = true; // Re-arm for next turn
-      return;
-    }
-
-    // Check if loop is paused (after handling user messages)
-    if (loopState.paused) {
-      // Don't auto-continue. User can resume with /ralph resume or by sending a message.
-      return;
-    }
-
-    // If the loop was just started (from tool or command), the current turn's output
-    // is not a hat response — skip event detection and let the queued hat message run.
-    if (pendingKickoff) {
-      pendingKickoff = false;
-      return;
-    }
-
     const output = getLastAssistantText(event.messages);
     const { preset } = loopState;
-    const currentHat = preset.hats[loopState.currentHatKey!];
+    const currentHat = preset.hats[loopState.currentHatKey];
 
     // Helper to capture iteration summary before transitions
     function captureIterationLog(eventName: string) {
@@ -993,111 +975,99 @@ export default function ralphExtension(pi: ExtensionAPI) {
       });
     }
 
-    // Check completion promise (scans all assistant messages)
-    if (containsCompletionPromiseInMessages(event.messages, preset.event_loop.completion_promise)) {
-      captureIterationLog(preset.event_loop.completion_promise);
-      completeLoop(ctx);
-      return;
-    }
-    // Also check legacy format in last message
-    if (output.includes(preset.event_loop.completion_promise)) {
-      captureIterationLog(preset.event_loop.completion_promise);
-      completeLoop(ctx);
-      return;
+    // Handle user-turn auto-resume (side effect before pure decision)
+    if (!loopState.loopTriggeredTurn && loopState.paused) {
+      loopState.paused = false;
+      updateStatus(ctx);
+      persistState();
+      ctx.ui.notify("▶ Loop auto-resumed after user message", "info");
     }
 
-    // Check max iterations
-    if (loopState.iteration >= preset.event_loop.max_iterations) {
-      stopLoop(ctx, `Max iterations reached (${preset.event_loop.max_iterations})`);
-      return;
-    }
-
-    // Check max runtime
-    if (preset.event_loop.max_runtime_seconds) {
-      const elapsed = (Date.now() - loopState.startTime) / 1000;
-      if (elapsed >= preset.event_loop.max_runtime_seconds) {
-        stopLoop(ctx, `Max runtime reached (${preset.event_loop.max_runtime_seconds}s)`);
-        return;
-      }
-    }
-
-    // Detect published event (scans all assistant messages, not just the last)
+    // Detect events from assistant messages
+    const completionPromiseFound = containsCompletionPromiseInMessages(
+      event.messages, preset.event_loop.completion_promise,
+    );
     const publishedEvent = detectPublishedEventFromMessages(event.messages, currentHat);
 
-    if (!publishedEvent) {
-      stopLoop(ctx, "No event published — loop stalled");
-      return;
-    }
+    // Pure orchestration decision
+    const action = determineNextAction({
+      completionPromiseFound,
+      publishedEvent,
+      loopTriggeredTurn: loopState.loopTriggeredTurn,
+      paused: loopState.paused,
+      pendingKickoff: loopState.pendingKickoff,
+      iteration: loopState.iteration,
+      startTime: loopState.startTime,
+      now: Date.now(),
+      preset,
+      currentHatKey: loopState.currentHatKey,
+      history: loopState.history,
+      activations: loopState.activations,
+    });
 
-    // Find next hat
-    const nextHatKey = findHatForEvent(publishedEvent, preset);
-    if (!nextHatKey) {
-      // No hat handles this event — treat as loop completion.
-      // Terminal hats (committer, verifier, etc.) publish events that no other
-      // hat triggers on. This is the normal completion path when the model
-      // publishes an event instead of outputting the completion promise.
-      completeLoop(ctx);
-      return;
-    }
+    // Apply action
+    switch (action.type) {
+      case "skip": {
+        if (action.reason === "user-turn") {
+          loopState.loopTriggeredTurn = true; // Re-arm for next turn
+        } else if (action.reason === "pending-kickoff") {
+          loopState.pendingKickoff = false;
+        }
+        return;
+      }
+      case "complete": {
+        if (completionPromiseFound) {
+          captureIterationLog(preset.event_loop.completion_promise);
+        } else if (publishedEvent) {
+          captureIterationLog(publishedEvent);
+        }
+        completeLoop(ctx);
+        return;
+      }
+      case "stop": {
+        stopLoop(ctx, action.reason);
+        return;
+      }
+      case "continue": {
+        const { nextHatKey, event: eventName } = action;
+        captureIterationLog(eventName);
 
-    // Check max_activations before advancing
-    const nextHatConfig = preset.hats[nextHatKey];
-    if (nextHatConfig.max_activations) {
-      const count = (loopState.activations[nextHatKey] || 0) + 1;
-      if (count > nextHatConfig.max_activations) {
-        stopLoop(ctx, `Hat "${nextHatConfig.name}" exhausted (${nextHatConfig.max_activations} activations)`);
+        // Advance loop
+        loopState.currentHatKey = nextHatKey;
+        loopState.iteration++;
+        loopState.activations[nextHatKey] = (loopState.activations[nextHatKey] ?? 0) + 1;
+        loopState.history.push({
+          hat: nextHatKey,
+          event: eventName,
+          iteration: loopState.iteration,
+        });
+
+        updateStatus(ctx);
+        persistState();
+
+        const nextHat = preset.hats[nextHatKey];
+        loopState.loopTriggeredTurn = true;
+
+        // Notify hat transition (forwarded to Slack by the bot)
+        ctx.ui.notify(
+          `Ralph loop [${loopState.iteration}/${preset.event_loop.max_iterations}]: ` +
+            `${currentHat.name} → ${nextHat.name} (event: ${eventName})`,
+          "info",
+        );
+
+        // Fresh session per hat — context passes through the scratchpad file on disk.
+        const newSessionFn = storedNewSession ?? (() => Promise.resolve({ cancelled: false }));
+        void newSessionFn().then(() => {
+          sendHatMessage(
+            `[Ralph Loop — Iteration ${loopState!.iteration}/${preset.event_loop.max_iterations}]\n` +
+              `Event: ${eventName} → Hat: ${nextHat.name}\n\n` +
+              `Task: ${loopState!.prompt}\n\n` +
+              `Read the scratchpad at \`${loopState!.cwd}/.ralph/scratchpad.md\` for context from the previous hat.`,
+          );
+        });
         return;
       }
     }
-
-    // Check for stale cycles — same hat:event sequence repeating without progress.
-    // Build tentative history including the next transition to detect the repeat.
-    const tentativeHistory = [
-      ...loopState.history,
-      { hat: nextHatKey, event: publishedEvent, iteration: loopState.iteration + 1 },
-    ];
-    if (detectStaleCycle(tentativeHistory)) {
-      captureIterationLog(publishedEvent);
-      completeLoop(ctx);
-      return;
-    }
-
-    // Capture iteration summary before transitioning
-    captureIterationLog(publishedEvent);
-
-    // Advance loop
-    loopState.currentHatKey = nextHatKey;
-    loopState.iteration++;
-    loopState.activations[nextHatKey] = (loopState.activations[nextHatKey] || 0) + 1;
-    loopState.history.push({
-      hat: nextHatKey,
-      event: publishedEvent,
-      iteration: loopState.iteration,
-    });
-
-    updateStatus(ctx);
-    persistState();
-
-    const nextHat = preset.hats[nextHatKey];
-    loopTriggeredTurn = true;
-
-    // Notify hat transition (forwarded to Slack by the bot)
-    ctx.ui.notify(
-      `Ralph loop [${loopState.iteration}/${preset.event_loop.max_iterations}]: ` +
-        `${currentHat.name} → ${nextHat.name} (event: ${publishedEvent})`,
-      "info",
-    );
-
-    // Fresh session per hat — context passes through the scratchpad file on disk.
-    const newSessionFn = storedNewSession ?? (() => Promise.resolve({ cancelled: false }));
-    newSessionFn().then(() => {
-      sendHatMessage(
-        `[Ralph Loop — Iteration ${loopState!.iteration}/${preset.event_loop.max_iterations}]\n` +
-          `Event: ${publishedEvent} → Hat: ${nextHat.name}\n\n` +
-          `Task: ${loopState!.prompt}\n\n` +
-          `Read the scratchpad at \`${loopState!.cwd}/.ralph/scratchpad.md\` for context from the previous hat.`,
-      );
-    });
   });
 
   // Persist loop state for session restore
@@ -1115,6 +1085,8 @@ export default function ralphExtension(pi: ExtensionAPI) {
         iterationLogs: loopState.iterationLogs,
         active: true,
         paused: loopState.paused,
+        loopTriggeredTurn: loopState.loopTriggeredTurn,
+        pendingKickoff: loopState.pendingKickoff,
       });
     }
   }
@@ -1129,18 +1101,36 @@ export default function ralphExtension(pi: ExtensionAPI) {
 
     // Restore loop state from session
     const entries = ctx.sessionManager.getEntries();
+
+    /** Shape of the data persisted via appendEntry("ralph-loop-state", ...) */
+    interface PersistedLoopState {
+      presetName: string;
+      currentHatKey: string | null;
+      iteration: number;
+      startTime: number;
+      prompt: string;
+      history: Array<{ hat: string; event: string; iteration: number }>;
+      activations: Record<string, number>;
+      steering: string[];
+      iterationLogs: import("./lib.js").IterationLog[];
+      active: boolean;
+      paused: boolean;
+      loopTriggeredTurn: boolean;
+      pendingKickoff: boolean;
+    }
+
     const stateEntry = entries
       .filter(
         (e: { type: string; customType?: string }) =>
           e.type === "custom" && e.customType === "ralph-loop-state",
       )
-      .pop() as { data?: any } | undefined;
+      .pop() as { data?: PersistedLoopState } | undefined;
 
     if (stateEntry?.data) {
       const d = stateEntry.data;
       // Only restore explicitly active loops — old entries without the field
       // (or entries marked active: false by stopLoop) are skipped
-      if (d.active !== true) return;
+      if (!d.active) return;
       const preset = presets[d.presetName];
       if (preset) {
         loopState = {
@@ -1151,14 +1141,15 @@ export default function ralphExtension(pi: ExtensionAPI) {
           startTime: d.startTime,
           prompt: d.prompt,
           active: true,
-          paused: d.paused || false,
+          paused: d.paused,
           cwd: ctx.cwd,
-          history: d.history || [],
-          activations: d.activations || {},
-          steering: d.steering || [],
-          iterationLogs: d.iterationLogs || [],
+          history: d.history,
+          activations: d.activations,
+          steering: d.steering,
+          iterationLogs: d.iterationLogs,
+          loopTriggeredTurn: true,
+          pendingKickoff: false,
         };
-        loopTriggeredTurn = true;
       }
     }
 

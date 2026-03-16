@@ -11,10 +11,14 @@ import {
   findHatForEvent,
   buildHatInjection,
   detectStaleCycle,
+  inferEventFromContent,
+  validatePreset,
+  determineNextAction,
   type HatConfig,
   type PresetConfig,
   type LoopState,
   type LoopRecord,
+  type LoopDecisionContext,
 } from "./lib.js";
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -61,11 +65,14 @@ function makeLoopState(overrides: Partial<LoopState> = {}): LoopState {
     startTime: Date.now(),
     prompt: "Do something",
     active: true,
+    paused: false,
     cwd: "/tmp/test-project",
     history: [],
     activations: {},
     steering: [],
     iterationLogs: [],
+    loopTriggeredTurn: false,
+    pendingKickoff: false,
     ...overrides,
   };
 }
@@ -417,6 +424,110 @@ describe("detectStaleCycle", () => {
       { hat: "builder", event: "tasks.ready", iteration: 5 },
     ];
     expect(detectStaleCycle(tentative)).toBe(false);
+  });
+});
+
+// ── inferEventFromContent ──────────────────────────────────────────────────
+
+describe("inferEventFromContent", () => {
+  const reviewerHat = makeHat({
+    publishes: ["review.approved", "review.changes_requested"],
+    default_publishes: "review.approved",
+  });
+
+  it("returns null for single-event hats (no inference needed)", () => {
+    const singleHat = makeHat({ publishes: ["build.done"], default_publishes: "build.done" });
+    const text = "NEEDS FIX — the code is broken";
+    expect(inferEventFromContent(text, singleHat)).toBeNull();
+  });
+
+  it("infers rejection from 'NEEDS FIX'", () => {
+    const text = "The implementation has bugs. NEEDS FIX before we can proceed.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("infers rejection from 'changes requested'", () => {
+    const text = "I've reviewed the code. Changes requested for error handling.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("infers rejection from 'not approved'", () => {
+    const text = "This code is not approved — missing tests.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("infers rejection from 'issues found'", () => {
+    const text = "Several issues found during review. The builder should fix them.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("infers rejection from 'sending back to builder'", () => {
+    const text = "I'm sending back to builder for corrections.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("infers approval from 'LGTM'", () => {
+    const text = "Code review complete. LGTM!";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.approved");
+  });
+
+  it("infers approval from 'looks good'", () => {
+    const text = "The implementation looks good. All tests pass.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.approved");
+  });
+
+  it("infers approval from 'approved'", () => {
+    const text = "I've reviewed the code and it is approved.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.approved");
+  });
+
+  it("infers approval from 'ship it'", () => {
+    const text = "Everything checks out. Ship it!";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.approved");
+  });
+
+  it("infers approval from 'ready to commit'", () => {
+    const text = "All checks pass, ready to commit.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.approved");
+  });
+
+  it("returns rejection when both approve and reject signals present (reject takes priority)", () => {
+    const text = "The code looks good overall, but there are issues found that need fixing.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("returns null when no strong signal present", () => {
+    const text = "I reviewed the code and made some observations about the architecture.";
+    expect(inferEventFromContent(text, reviewerHat)).toBeNull();
+  });
+
+  it("is case-insensitive", () => {
+    const text = "needs fix — multiple problems detected.";
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("works with the exact bug scenario from the report", () => {
+    // Reviewer says NEEDS FIX in prose but forgets the event tag
+    const text = `## Review
+
+I've reviewed the builder's changes. There are several issues:
+
+1. Missing null check in the handler
+2. Test coverage is insufficient
+3. Error messages are not user-friendly
+
+**NEEDS FIX** — sending back to the builder for corrections.`;
+    expect(inferEventFromContent(text, reviewerHat)).toBe("review.changes_requested");
+  });
+
+  it("returns null for hat with no default_publishes when approve signal found", () => {
+    const noDefaultHat = makeHat({
+      publishes: ["review.approved", "review.changes_requested"],
+      default_publishes: undefined,
+    });
+    // Should still return first event as the "positive" path
+    const text = "LGTM, ship it!";
+    expect(inferEventFromContent(text, noDefaultHat)).toBe("review.approved");
   });
 });
 
@@ -893,4 +1004,355 @@ describe("built-in presets", () => {
       });
     });
   }
+});
+
+// ── validatePreset ─────────────────────────────────────────────────────────
+
+describe("validatePreset", () => {
+  it("returns no issues for a valid preset", () => {
+    const preset = makePreset();
+    const issues = validatePreset("test", preset);
+    // May have warnings but no errors
+    const errors = issues.filter((i) => i.level === "error");
+    expect(errors).toEqual([]);
+  });
+
+  it("reports error for hat with no instructions", () => {
+    const preset = makePreset({
+      hats: {
+        broken: makeHat({ instructions: "" }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.level === "error" && i.message.includes("no instructions"))).toBe(true);
+  });
+
+  it("reports error for hat with no triggers", () => {
+    const preset = makePreset({
+      hats: {
+        broken: makeHat({ triggers: [] }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.level === "error" && i.message.includes("no triggers"))).toBe(true);
+  });
+
+  it("reports error for hat with no publishable events", () => {
+    const preset = makePreset({
+      hats: {
+        broken: makeHat({ publishes: [] }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.level === "error" && i.message.includes("no publishable events"))).toBe(true);
+  });
+
+  it("reports error for unreachable starting event", () => {
+    const preset = makePreset();
+    preset.event_loop.starting_event = "nonexistent.event";
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.level === "error" && i.message.includes("no matching hat trigger"))).toBe(true);
+  });
+
+  it("reports warning for dead-end events", () => {
+    const preset = makePreset({
+      hats: {
+        worker: makeHat({
+          triggers: ["start"],
+          publishes: ["some.orphan.event"],
+          instructions: "Do work.",
+        }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.level === "warning" && i.message.includes("no consumer"))).toBe(true);
+  });
+
+  it("reports warning when no hat mentions completion promise", () => {
+    const preset = makePreset({
+      hats: {
+        worker: makeHat({
+          triggers: ["start"],
+          publishes: ["done"],
+          instructions: "Do work. (no promise mentioned)",
+        }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.level === "warning" && i.message.includes("no hat mentions"))).toBe(true);
+  });
+
+  it("reports warning for 3+ hat presets with no loop-back", () => {
+    const preset = makePreset({
+      hats: {
+        a: makeHat({ triggers: ["start"], publishes: ["a.done"], instructions: "LOOP_COMPLETE or work" }),
+        b: makeHat({ triggers: ["a.done"], publishes: ["b.done"], instructions: "Work" }),
+        c: makeHat({ triggers: ["b.done"], publishes: ["c.done"], instructions: "Work" }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.level === "warning" && i.message.includes("no loop-back"))).toBe(true);
+  });
+
+  it("does not report loop-back warning for 2-hat presets", () => {
+    const preset = makePreset({
+      hats: {
+        a: makeHat({ triggers: ["start"], publishes: ["a.done"], instructions: "LOOP_COMPLETE" }),
+        b: makeHat({ triggers: ["a.done"], publishes: ["b.done"], instructions: "Work" }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.message.includes("no loop-back"))).toBe(false);
+  });
+
+  it("no loop-back warning when a later hat triggers an earlier hat", () => {
+    const preset = makePreset({
+      hats: {
+        builder: makeHat({ triggers: ["start", "review.failed"], publishes: ["build.done"], instructions: "LOOP_COMPLETE" }),
+        reviewer: makeHat({ triggers: ["build.done"], publishes: ["review.passed", "review.failed"], instructions: "Review" }),
+        committer: makeHat({ triggers: ["review.passed"], publishes: ["committed"], instructions: "Commit" }),
+      },
+    });
+    const issues = validatePreset("test", preset);
+    expect(issues.some((i) => i.message.includes("no loop-back"))).toBe(false);
+  });
+
+  it("loadPresetsFromDir skips presets with validation errors", () => {
+    const tmpDir = join("/tmp", "ralph-test-validate-" + process.pid);
+    mkdirSync(tmpDir, { recursive: true });
+    try {
+      // Valid preset
+      writeFileSync(join(tmpDir, "good.yml"), `
+event_loop:
+  starting_event: "go"
+  max_iterations: 10
+hats:
+  worker:
+    triggers: ["go"]
+    publishes: ["done"]
+    instructions: "LOOP_COMPLETE"
+`);
+      // Invalid preset — hat with no triggers
+      writeFileSync(join(tmpDir, "bad.yml"), `
+event_loop:
+  max_iterations: 10
+hats:
+  broken:
+    publishes: ["done"]
+    instructions: "Work"
+`);
+      const presets = loadPresetsFromDir(tmpDir);
+      expect(Object.keys(presets)).toEqual(["good"]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── determineNextAction ────────────────────────────────────────────────────
+
+describe("determineNextAction", () => {
+  function makeDecisionContext(overrides: Partial<LoopDecisionContext> = {}): LoopDecisionContext {
+    const preset = makePreset();
+    return {
+      completionPromiseFound: false,
+      publishedEvent: "build.done",
+      loopTriggeredTurn: true,
+      paused: false,
+      pendingKickoff: false,
+      iteration: 1,
+      startTime: Date.now() - 10000,
+      now: Date.now(),
+      preset,
+      currentHatKey: "builder",
+      history: [{ hat: "builder", event: "start", iteration: 1 }],
+      activations: { builder: 1 },
+      ...overrides,
+    };
+  }
+
+  it("returns skip for user-turn", () => {
+    const action = determineNextAction(makeDecisionContext({ loopTriggeredTurn: false }));
+    expect(action).toEqual({ type: "skip", reason: "user-turn" });
+  });
+
+  it("returns skip when paused", () => {
+    const action = determineNextAction(makeDecisionContext({ paused: true }));
+    expect(action).toEqual({ type: "skip", reason: "paused" });
+  });
+
+  it("returns skip for pending kickoff", () => {
+    const action = determineNextAction(makeDecisionContext({ pendingKickoff: true }));
+    expect(action).toEqual({ type: "skip", reason: "pending-kickoff" });
+  });
+
+  it("returns complete when completion promise found", () => {
+    const action = determineNextAction(makeDecisionContext({ completionPromiseFound: true }));
+    expect(action).toEqual({ type: "complete" });
+  });
+
+  it("returns stop on max iterations", () => {
+    const action = determineNextAction(makeDecisionContext({ iteration: 50 }));
+    expect(action.type).toBe("stop");
+    if (action.type === "stop") {
+      expect(action.reason).toContain("Max iterations");
+    }
+  });
+
+  it("returns stop on max runtime", () => {
+    const now = Date.now();
+    const ctx = makeDecisionContext({
+      startTime: now - 4000 * 1000,
+      now,
+    });
+    ctx.preset.event_loop.max_runtime_seconds = 3600;
+    const action = determineNextAction(ctx);
+    expect(action.type).toBe("stop");
+    if (action.type === "stop") {
+      expect(action.reason).toContain("Max runtime");
+    }
+  });
+
+  it("returns stop when no event published (stalled)", () => {
+    const action = determineNextAction(makeDecisionContext({ publishedEvent: null }));
+    expect(action).toEqual({ type: "stop", reason: "No event published — loop stalled" });
+  });
+
+  it("returns complete for terminal event (no consumer hat)", () => {
+    const action = determineNextAction(makeDecisionContext({ publishedEvent: "terminal.event" }));
+    expect(action).toEqual({ type: "complete" });
+  });
+
+  it("returns continue with next hat for valid event", () => {
+    const action = determineNextAction(makeDecisionContext({ publishedEvent: "build.done" }));
+    expect(action.type).toBe("continue");
+    if (action.type === "continue") {
+      expect(action.nextHatKey).toBe("reviewer");
+      expect(action.event).toBe("build.done");
+    }
+  });
+
+  it("returns stop when next hat exceeds max_activations", () => {
+    const ctx = makeDecisionContext({ publishedEvent: "build.done" });
+    ctx.preset.hats.reviewer.max_activations = 2;
+    ctx.activations = { reviewer: 2 };
+    const action = determineNextAction(ctx);
+    expect(action.type).toBe("stop");
+    if (action.type === "stop") {
+      expect(action.reason).toContain("exhausted");
+    }
+  });
+
+  it("returns complete on stale cycle detection", () => {
+    // Build a preset where builder and reviewer can cycle indefinitely
+    const preset = makePreset({
+      hats: {
+        builder: makeHat({ triggers: ["start", "review.failed"], publishes: ["build.done"], instructions: "Build" }),
+        reviewer: makeHat({
+          name: "Reviewer",
+          triggers: ["build.done"],
+          publishes: ["review.passed", "review.failed"],
+          default_publishes: "review.failed",
+          instructions: "Review",
+        }),
+      },
+    });
+    // History: 3 identical cycles of builder:review.failed → reviewer:build.done
+    const history = [
+      { hat: "builder", event: "start", iteration: 1 },          // initial
+      { hat: "reviewer", event: "build.done", iteration: 2 },
+      { hat: "builder", event: "review.failed", iteration: 3 },  // cycle 1
+      { hat: "reviewer", event: "build.done", iteration: 4 },
+      { hat: "builder", event: "review.failed", iteration: 5 },  // cycle 2
+      { hat: "reviewer", event: "build.done", iteration: 6 },
+    ];
+    const ctx = makeDecisionContext({
+      history,
+      iteration: 6,
+      preset,
+      currentHatKey: "reviewer",
+      publishedEvent: "review.failed",
+      activations: { builder: 3, reviewer: 3 },
+    });
+    // The tentative next entry (builder:review.failed) completes the 3rd repeat
+    const action = determineNextAction(ctx);
+    expect(action.type).toBe("complete");
+  });
+
+  it("completion promise takes priority over max iterations", () => {
+    const action = determineNextAction(makeDecisionContext({
+      completionPromiseFound: true,
+      iteration: 50,
+    }));
+    expect(action).toEqual({ type: "complete" });
+  });
+
+  it("skip takes priority over completion promise", () => {
+    // User turn should skip even if promise is found
+    const action = determineNextAction(makeDecisionContext({
+      loopTriggeredTurn: false,
+      completionPromiseFound: true,
+    }));
+    expect(action.type).toBe("skip");
+  });
+});
+
+// ── inferEventFromContent (event-name matching) ────────────────────────────
+
+describe("inferEventFromContent event-name matching", () => {
+  it("maps reject signal to event with 'fail' in name", () => {
+    const hat = makeHat({
+      publishes: ["deploy.success", "deploy.fail"],
+      default_publishes: "deploy.success",
+    });
+    const text = "Deployment has issues found. Needs fix.";
+    expect(inferEventFromContent(text, hat)).toBe("deploy.fail");
+  });
+
+  it("maps approve signal to event with 'success' in name", () => {
+    const hat = makeHat({
+      publishes: ["deploy.success", "deploy.fail"],
+      default_publishes: "deploy.success",
+    });
+    const text = "Everything looks good, LGTM!";
+    expect(inferEventFromContent(text, hat)).toBe("deploy.success");
+  });
+
+  it("maps reject signal to event with 'rollback' in name", () => {
+    const hat = makeHat({
+      publishes: ["deploy.proceed", "deploy.rollback"],
+      default_publishes: "deploy.proceed",
+    });
+    const text = "Critical issues found, cannot approve.";
+    expect(inferEventFromContent(text, hat)).toBe("deploy.rollback");
+  });
+
+  it("maps approve signal to event with 'pass' in name", () => {
+    const hat = makeHat({
+      publishes: ["verify.pass", "verify.reject"],
+      default_publishes: undefined,
+    });
+    const text = "All checks pass, ship it!";
+    expect(inferEventFromContent(text, hat)).toBe("verify.pass");
+  });
+
+  it("falls back to non-default when no event name matches reject keywords", () => {
+    const hat = makeHat({
+      publishes: ["path.a", "path.b"],
+      default_publishes: "path.a",
+    });
+    const text = "Issues found, needs fix.";
+    // No event name matches reject keywords, so falls back to non-default
+    expect(inferEventFromContent(text, hat)).toBe("path.b");
+  });
+
+  it("falls back to default when no event name matches approve keywords", () => {
+    const hat = makeHat({
+      publishes: ["path.a", "path.b"],
+      default_publishes: "path.a",
+    });
+    const text = "LGTM, looks good!";
+    // No event name matches approve keywords, so falls back to default
+    expect(inferEventFromContent(text, hat)).toBe("path.a");
+  });
 });
