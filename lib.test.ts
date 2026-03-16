@@ -14,6 +14,7 @@ import {
   inferEventFromContent,
   validatePreset,
   determineNextAction,
+  extractNextTask,
   type HatConfig,
   type PresetConfig,
   type LoopState,
@@ -1354,5 +1355,132 @@ describe("inferEventFromContent event-name matching", () => {
     const text = "LGTM, looks good!";
     // No event name matches approve keywords, so falls back to default
     expect(inferEventFromContent(text, hat)).toBe("path.a");
+  });
+});
+
+// ── extractNextTask ────────────────────────────────────────────────────────
+
+describe("extractNextTask", () => {
+  it("returns the first unchecked task", () => {
+    const content = `## Tasks
+- [x] 1. Setup project
+- [ ] 2. Add authentication
+- [ ] 3. Add tests`;
+    const result = extractNextTask(content);
+    expect(result).toEqual({
+      taskNumber: 2,
+      description: "Add authentication",
+      totalTasks: 3,
+      completedTasks: 1,
+    });
+  });
+
+  it("returns the first task when none are completed", () => {
+    const content = `## Tasks
+- [ ] 1. First task
+- [ ] 2. Second task`;
+    const result = extractNextTask(content);
+    expect(result).toEqual({
+      taskNumber: 1,
+      description: "First task",
+      totalTasks: 2,
+      completedTasks: 0,
+    });
+  });
+
+  it("returns null when all tasks are completed", () => {
+    const content = `## Tasks
+- [x] 1. First task
+- [X] 2. Second task`;
+    expect(extractNextTask(content)).toBeNull();
+  });
+
+  it("returns null when no tasks found", () => {
+    expect(extractNextTask("No tasks here")).toBeNull();
+    expect(extractNextTask("")).toBeNull();
+  });
+
+  it("handles tasks without numbering", () => {
+    const content = `- [x] Setup stuff
+- [ ] Do the thing`;
+    const result = extractNextTask(content);
+    expect(result).toEqual({
+      taskNumber: 2,
+      description: "Do the thing",
+      totalTasks: 2,
+      completedTasks: 1,
+    });
+  });
+
+  it("handles asterisk bullet points", () => {
+    const content = `* [x] Done
+* [ ] Not done`;
+    const result = extractNextTask(content);
+    expect(result).toEqual({
+      taskNumber: 2,
+      description: "Not done",
+      totalTasks: 2,
+      completedTasks: 1,
+    });
+  });
+
+  it("handles scratchpad with other content mixed in", () => {
+    const content = `# Ralph Scratchpad
+
+Preset: feature
+Task: Add auth
+
+---
+
+## Tasks
+- [x] 1. Setup project structure
+- [ ] 2. Add JWT middleware
+- [ ] 3. Add login endpoint
+
+## Notes from Planner
+Some context here`;
+    const result = extractNextTask(content);
+    expect(result).toEqual({
+      taskNumber: 2,
+      description: "Add JWT middleware",
+      totalTasks: 3,
+      completedTasks: 1,
+    });
+  });
+});
+
+// ── buildHatInjection with single_task ─────────────────────────────────────
+
+describe("buildHatInjection with single_task", () => {
+  it("injects current task info when single_task is true and scratchpad exists", () => {
+    const tmpDir = join(__dirname, ".test-injection-" + Date.now());
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    writeFileSync(
+      join(tmpDir, ".ralph", "scratchpad.md"),
+      `## Tasks\n- [x] 1. Done task\n- [ ] 2. Current task\n- [ ] 3. Future task\n`,
+    );
+
+    const hat = makeHat({
+      single_task: true,
+      instructions: "Do the work.",
+    });
+    const state = makeLoopState({ cwd: tmpDir });
+
+    const injection = buildHatInjection(hat, state);
+    expect(injection).toContain("YOUR CURRENT TASK (2 of 3, 1 completed)");
+    expect(injection).toContain("Task 2:** Current task");
+    expect(injection).toContain("ONLY task you may work on");
+    expect(injection).toContain("Do the work.");
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("does not inject task info when single_task is false", () => {
+    const hat = makeHat({ instructions: "Do stuff." });
+    const state = makeLoopState();
+
+    const injection = buildHatInjection(hat, state);
+    expect(injection).not.toContain("YOUR CURRENT TASK");
+    expect(injection).toContain("Do stuff.");
   });
 });

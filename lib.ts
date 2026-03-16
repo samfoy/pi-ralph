@@ -18,6 +18,10 @@ export interface HatConfig {
   instructions: string;
   disallowed_tools?: string[];
   max_activations?: number;
+  /** When true, the scratchpad is parsed and only the next unchecked task is
+   *  injected into the hat prompt. Prevents the LLM from seeing (and attempting)
+   *  all remaining tasks at once. */
+  single_task?: boolean;
 }
 
 export interface EventLoopConfig {
@@ -96,6 +100,7 @@ interface RawPreset {
     instructions?: string;
     disallowed_tools?: unknown;
     max_activations?: unknown;
+    single_task?: unknown;
   }>;
   core?: {
     specs_dir?: string;
@@ -124,6 +129,7 @@ export function parsePreset(raw: unknown): PresetConfig | null {
       instructions: h.instructions ?? "",
       disallowed_tools: Array.isArray(h.disallowed_tools) ? (h.disallowed_tools as string[]) : undefined,
       max_activations: typeof h.max_activations === "number" ? h.max_activations : undefined,
+      single_task: h.single_task === true ? true : undefined,
     };
   }
 
@@ -638,6 +644,53 @@ export function determineNextAction(ctx: LoopDecisionContext): LoopAction {
   return { type: "continue", nextHatKey, event: ctx.publishedEvent };
 }
 
+// ── Scratchpad Task Parsing ─────────────────────────────────────────────────
+
+export interface TaskInfo {
+  /** 1-based index of the current (next unchecked) task. */
+  taskNumber: number;
+  /** The description text of the current task. */
+  description: string;
+  /** Total tasks in the plan. */
+  totalTasks: number;
+  /** Number of tasks already completed. */
+  completedTasks: number;
+}
+
+/**
+ * Parse a scratchpad's task checklist and return info about the next unchecked task.
+ * Recognizes `- [ ] ...` (unchecked) and `- [x] ...` / `- [X] ...` (checked).
+ * Returns null if no unchecked tasks remain.
+ */
+export function extractNextTask(scratchpadContent: string): TaskInfo | null {
+  const lines = scratchpadContent.split("\n");
+  const taskPattern = /^[-*]\s+\[([ xX])\]\s*(?:\d+\.\s*)?(.+)/;
+  const tasks: Array<{ checked: boolean; description: string }> = [];
+
+  for (const line of lines) {
+    const match = line.trim().match(taskPattern);
+    if (match) {
+      tasks.push({
+        checked: match[1].toLowerCase() === "x",
+        description: match[2].trim(),
+      });
+    }
+  }
+
+  if (tasks.length === 0) return null;
+
+  const completedTasks = tasks.filter((t) => t.checked).length;
+  const nextIdx = tasks.findIndex((t) => !t.checked);
+  if (nextIdx === -1) return null; // All tasks complete
+
+  return {
+    taskNumber: nextIdx + 1,
+    description: tasks[nextIdx].description,
+    totalTasks: tasks.length,
+    completedTasks,
+  };
+}
+
 // ── Hat Injection ──────────────────────────────────────────────────────────
 
 export function buildHatInjection(hat: HatConfig, state: LoopState): string {
@@ -647,6 +700,29 @@ export function buildHatInjection(hat: HatConfig, state: LoopState): string {
 
   let injection = `\n## Ralph Orchestration — Hat: ${hat.name}\n`;
   injection += `Iteration ${state.iteration}/${preset.event_loop.max_iterations}\n\n`;
+
+  // When single_task is enabled, parse the scratchpad and inject only the
+  // current task — the LLM never sees the full task list, which prevents it
+  // from trying to implement everything at once.
+  let currentTaskInfo: TaskInfo | null = null;
+  if (hat.single_task) {
+    try {
+      if (existsSync(scratchpadPath)) {
+        const content = readFileSync(scratchpadPath, "utf-8");
+        currentTaskInfo = extractNextTask(content);
+      }
+    } catch {
+      // Fall through — currentTaskInfo stays null
+    }
+
+    if (currentTaskInfo) {
+      injection += `### YOUR CURRENT TASK (${currentTaskInfo.taskNumber} of ${currentTaskInfo.totalTasks}, ${currentTaskInfo.completedTasks} completed)\n\n`;
+      injection += `> **Task ${currentTaskInfo.taskNumber}:** ${currentTaskInfo.description}\n\n`;
+      injection += `**This is the ONLY task you may work on.** Do not implement anything else.\n`;
+      injection += `The orchestration loop will call you again for the next task after this one is reviewed and committed.\n\n`;
+    }
+  }
+
   injection += hat.instructions;
 
   if (preset.core?.guardrails?.length) {

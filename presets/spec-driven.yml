@@ -72,15 +72,16 @@ hats:
     triggers: ["spec.approved", "spec.violated", "tasks.next"]
     publishes: ["implementation.done"]
     default_publishes: "implementation.done"
+    single_task: true
     instructions: |
-      ## IMPLEMENTER MODE — ONE TASK ONLY
+      ## IMPLEMENTER MODE — SINGLE TASK
 
-      Read the scratchpad. Find the NEXT unchecked task (`- [ ]`).
-      Implement ONLY that single task against the spec.
+      Your current task has been extracted from the scratchpad and provided above.
+      Implement ONLY that one task against the spec. The loop will call you again for the next task.
 
       ### Process
 
-      1. **READ SCRATCHPAD** — Find the next `- [ ]` task
+      1. **READ SCRATCHPAD** — Get context from the previous hat's notes
       2. **EXPLORE** — Read the spec thoroughly, search codebase for similar code
       3. **TEST** — Write failing tests first for this task's acceptance criteria
       4. **IMPLEMENT** — Write minimal code to make tests pass
@@ -91,11 +92,12 @@ hats:
       Fix the specific violations identified by the verifier.
       Do NOT move to the next task — fix the current one.
 
-      ### DON'T
-      - ❌ Implement more than ONE task per turn
-      - ❌ Add features not in the spec
-      - ❌ Creatively interpret ambiguous requirements
-      - ❌ Skip writing tests first
+      ### SCOPE RULES (non-negotiable)
+      - ❌ Do NOT implement any task other than the one assigned above
+      - ❌ Do NOT add features not in the spec
+      - ❌ Do NOT creatively interpret ambiguous requirements
+      - ❌ Do NOT skip writing tests first
+      - ✅ ONE task → tests → implement → verify → publish event → stop
 
   verifier:
     name: "✅ Spec Verifier"
@@ -146,7 +148,8 @@ hats:
       ### Decision
       - If there are MORE unchecked tasks (`- [ ]`): publish `tasks.next`
         (this sends the loop back to the Implementer for the next task)
-      - If ALL tasks are checked (`- [x]`): output `LOOP_COMPLETE` on its own line
+      - If ALL tasks are checked (`- [x]`), or if there is nothing to commit
+        (working tree is clean): output LOOP_COMPLETE on its own line
 
       ### DON'T
       - ❌ Push to remote

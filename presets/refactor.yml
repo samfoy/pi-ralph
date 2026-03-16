@@ -91,7 +91,8 @@ hats:
       ### Decision
       - If there is MORE refactoring to do: publish `refactor.task`
         (this sends the loop back to the Refactorer for the next step)
-      - If ALL refactoring is complete: output `REFACTOR_COMPLETE` on its own line
+      - If ALL refactoring is complete, or if there is nothing to commit
+        (working tree is clean): output REFACTOR_COMPLETE on its own line
 
       ### DON'T
       - ❌ Commit if tests don't pass

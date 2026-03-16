@@ -50,31 +50,33 @@ hats:
     triggers: ["tasks.ready", "review.changes_requested"]
     publishes: ["build.done"]
     default_publishes: "build.done"
+    single_task: true
     instructions: |
-      ## BUILDER MODE — ONE TASK ONLY
+      ## BUILDER MODE — SINGLE TASK
 
-      Read the scratchpad. Find the NEXT unchecked task. Implement ONLY that single task, then stop.
+      Your current task has been extracted from the scratchpad and provided above.
+      Implement ONLY that one task. The loop will call you again for the next task.
 
       ### Process
-      1. **READ SCRATCHPAD** — Find the next `- [ ]` task. This is your ONLY task.
+      1. **READ SCRATCHPAD** — Get context from the previous hat's notes
       2. **EXPLORE** — Read relevant files, understand current state
-      3. **IMPLEMENT** — Write code following existing patterns
+      3. **IMPLEMENT** — Write code for YOUR CURRENT TASK ONLY, following existing patterns
       4. **TEST** — Write tests, run the full suite
       5. **VERIFY** — Typecheck, lint, all tests pass
-      6. **UPDATE SCRATCHPAD** — Add notes about what you did
-      7. **PUBLISH EVENT** — You are done. Publish build.done immediately.
-
-      You MUST stop after completing ONE task. Do not look at the next task.
-      Do not "while I'm here" any other changes. One task, one event, done.
+      6. **UPDATE SCRATCHPAD** — Add notes about what you did under the current task
+      7. **PUBLISH EVENT** — Publish build.done immediately. You are done.
 
       ### If Triggered by review.changes_requested
       Fix the specific issues the Reviewer identified.
       Do NOT move to the next task — fix the current one.
 
-      ### DON'T
-      - ❌ Implement more than ONE task per turn
-      - ❌ Mark tasks complete — the Reviewer does that
-      - ❌ Skip tests
+      ### SCOPE RULES (non-negotiable)
+      - ❌ Do NOT implement any task other than the one assigned above
+      - ❌ Do NOT "while I'm here" any other changes
+      - ❌ Do NOT look ahead at future tasks in the scratchpad
+      - ❌ Do NOT mark tasks complete — the Reviewer does that
+      - ❌ Do NOT skip tests
+      - ✅ ONE task → tests → verify → publish event → stop
 
   reviewer:
     name: "🔎 Reviewer"
@@ -143,7 +145,8 @@ hats:
       ### Decision
       - If there are MORE unchecked tasks (`- [ ]`): publish `tasks.ready`
         (this sends the loop back to the Builder for the next task)
-      - If ALL tasks are checked (`- [x]`): output `LOOP_COMPLETE` on its own line
+      - If ALL tasks are checked (`- [x]`), or if there is nothing to commit
+        (working tree is clean): output LOOP_COMPLETE on its own line
 
       ### DON'T
       - ❌ Commit if tests don't pass

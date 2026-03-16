@@ -54,15 +54,16 @@ hats:
     triggers: ["tasks.ready", "validation.failed"]
     publishes: ["implementation.ready"]
     default_publishes: "implementation.ready"
+    single_task: true
     instructions: |
-      ## BUILDER MODE — TDD Cycle (ONE TASK ONLY)
+      ## BUILDER MODE — TDD Cycle (SINGLE TASK)
 
-      Read the scratchpad. Find the NEXT unchecked task (`- [ ]`).
-      Implement ONLY that single task using strict TDD.
+      Your current task has been extracted from the scratchpad and provided above.
+      Implement ONLY that one task using strict TDD. The loop will call you again for the next task.
 
       ### Process
 
-      1. **READ SCRATCHPAD** — Find the next `- [ ]` task. This is your ONLY task.
+      1. **READ SCRATCHPAD** — Get context from the previous hat's notes
       2. **EXPLORE** — Read task requirements, search for similar code
       3. **RED** — Write failing tests first
       4. **GREEN** — Write minimal code to make tests pass
@@ -74,11 +75,12 @@ hats:
       Fix the specific issues the Validator identified.
       Do NOT move to the next task — fix the current one.
 
-      ### DON'T
-      - ❌ Implement more than ONE task per turn
-      - ❌ Write implementation before tests
-      - ❌ Add features not in the plan
-      - ❌ Skip the refactor step
+      ### SCOPE RULES (non-negotiable)
+      - ❌ Do NOT implement any task other than the one assigned above
+      - ❌ Do NOT write implementation before tests
+      - ❌ Do NOT add features not in the plan
+      - ❌ Do NOT skip the refactor step
+      - ✅ ONE task → RED → GREEN → REFACTOR → verify → publish event → stop
 
   validator:
     name: "✅ Validator"
@@ -146,7 +148,8 @@ hats:
       ### Decision
       - If there are MORE unchecked tasks (`- [ ]`): publish `tasks.ready`
         (this sends the loop back to the Builder for the next task)
-      - If ALL tasks are checked (`- [x]`): output `LOOP_COMPLETE` on its own line
+      - If ALL tasks are checked (`- [x]`), or if there is nothing to commit
+        (working tree is clean): output LOOP_COMPLETE on its own line
 
       ### DON'T
       - ❌ Commit if validation didn't pass
