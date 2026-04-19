@@ -1,6 +1,6 @@
 {
   "name": "pi-ralph",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "description": "Hat-based multi-agent orchestration loops for pi. Keeps the agent iterating through specialized roles (Planner, Builder, Reviewer, etc.) until a task is complete.",
   "type": "module",
   "keywords": [
