@@ -1,5 +1,8 @@
 # Ralph
 
+> [!WARNING]
+> **Deprecated — no longer maintained.** This package is archived and will not receive updates for current pi releases. For multi-agent orchestration in pi, see pi's bundled `subagent` example extension.
+
 A [pi](https://github.com/mariozechner/pi-coding-agent) extension for hat-based multi-agent orchestration loops. Ralph keeps the agent iterating through specialized "hats" (roles) until a task is complete — each hat has its own instructions, triggers, and events that drive the workflow forward.
 
 ## Features
